@@ -51,12 +51,15 @@ MainComponent::MainComponent()
 
             recButton.setButtonText("REC");
             recButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+
+            // 録音終了後にリストを更新
+            sampleList->updateFileList();
         }
         else
         {
             // Start recording setup - OUTSIDE the lock to avoid blocking audio thread
-            auto file = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-                            .getNonexistentChildFile("ScratchAI_Recording", ".wav");
+            auto parentDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+            auto file = parentDir.getNonexistentChildFile("ScratchAI_Recording", ".wav");
 
             // Create writer on message thread
             if (auto fileStream = std::unique_ptr<juce::FileOutputStream>(file.createOutputStream()))

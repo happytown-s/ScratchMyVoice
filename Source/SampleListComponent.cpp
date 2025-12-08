@@ -81,8 +81,27 @@ void SampleListComponent::buttonClicked(juce::Button* button)
 
 void SampleListComponent::updateFileList()
 {
-    // ここでフォルダをスキャンして sampleFiles に追加する処理が必要
-    // 今回は空にしておくか、ダミーを入れる
     sampleFiles.clear();
+
+    // ドキュメントフォルダをスキャン
+    auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
+    // wavファイルを探す
+    if (dir.isDirectory())
+    {
+        auto files = dir.findChildFiles(juce::File::findFiles, false, "*.wav");
+        for (auto& f : files)
+        {
+            // "ScratchAI_" で始まるファイルだけを対象にするなど、フィルタリングも可能
+            if (f.getFileName().startsWith("ScratchAI_"))
+                sampleFiles.push_back(f);
+        }
+    }
+
+    // 並び替え（新しい順）
+    std::sort(sampleFiles.begin(), sampleFiles.end(), [](const juce::File& a, const juce::File& b) {
+        return a.getLastModificationTime() > b.getLastModificationTime();
+    });
+
     listBox.updateContent();
 }
