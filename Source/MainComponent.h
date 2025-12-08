@@ -38,9 +38,15 @@ class MainComponent : public juce::AudioAppComponent, public juce::Button::Liste
 
 	// Layout Controls
 	juce::TextButton libraryToggleButton { "Library" };
+	juce::TextButton recButton { "REC" };
 	juce::TextButton playStopButton { "START/STOP" };
 
-	bool isLibraryOpen = true;
+	bool isLibraryOpen = false;
+
+	// Recording
+	juce::TimeSliceThread backgroundThread { "Audio Recorder Thread" };
+	std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> threadedWriter;
+	juce::CriticalSection writerLock;
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

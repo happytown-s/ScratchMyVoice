@@ -34,7 +34,55 @@ MainComponent::MainComponent()
         resized(); // レイアウト更新
     };
 
+    addAndMakeVisible(recButton);
+    recButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+    recButton.onClick = [this] {
+        if (threadedWriter != nullptr)
+        {
+            // Stop recording
+            std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writerToDelete;
+            {
+                // Swap ownership inside the lock
+                juce::ScopedLock sl(writerLock);
+                writerToDelete = std::move(threadedWriter);
+            }
+            // Now writerToDelete goes out of scope and flushes/closes OUTSIDE the lock
+            // This prevents blocking the audio thread
+
+            recButton.setButtonText("REC");
+            recButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+        }
+        else
+        {
+            // Start recording setup - OUTSIDE the lock to avoid blocking audio thread
+            auto file = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                            .getNonexistentChildFile("ScratchAI_Recording", ".wav");
+
+            // Create writer on message thread
+            if (auto fileStream = std::unique_ptr<juce::FileOutputStream>(file.createOutputStream()))
+            {
+                juce::WavAudioFormat wavFormat;
+                if (auto writer = wavFormat.createWriterFor(fileStream.get(), 44100.0, 2, 24, {}, 0))
+                {
+                    fileStream.release(); // Writer takes ownership
+                    auto newWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(writer, backgroundThread, 32768);
+
+                    // Now safely swap inside the lock
+                    {
+                        juce::ScopedLock sl(writerLock);
+                        threadedWriter = std::move(newWriter);
+                    }
+
+                    recButton.setButtonText("STOP REC");
+                    recButton.setColour(juce::TextButton::buttonColourId, juce::Colours::red);
+                }
+            }
+        }
+    };
+
     setSize(800, 600);
+
+    backgroundThread.startThread();
 
     // 録音権限の要求 (モバイルや最近のmacOSで必須)
     if (juce::RuntimePermissions::isRequired (juce::RuntimePermissions::recordAudio)
@@ -51,6 +99,11 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    {
+        juce::ScopedLock sl(writerLock);
+        threadedWriter.reset();
+    }
+    backgroundThread.stopThread(4000);
     shutdownAudio();
 }
 
@@ -66,15 +119,20 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
 
     // 2. マイク入力がある場合、ここにデータが入っています
     // 録音中なら、この bufferToFill の内容をファイルに書き込む処理が必要です
-    if (audioEngine.isRecording())
-    {
-        // ここでWriterに書き込む処理を追加します
-        // (簡易実装のため省略しますが、入力バッファはここにあります)
-    }
+    // (今回は出力＝スクラッチ音を録音するため、ここでは何もしません)
 
     // 3. AudioEngine（スクラッチ音）の音声をバッファに加算または上書き
     // これによりスクラッチ音がスピーカーから出ます
     audioEngine.getNextAudioBlock(bufferToFill);
+
+    // 4. 録音処理 (出力音声を録音)
+    // Try lock to avoid waiting? No, standard lock is fine if contention is low.
+    // ThreadedWriter is fast.
+    const juce::ScopedLock sl(writerLock);
+    if (threadedWriter != nullptr)
+    {
+        threadedWriter->write(bufferToFill.buffer->getArrayOfReadPointers(), bufferToFill.numSamples);
+    }
 }
 
 void MainComponent::releaseResources()
@@ -100,7 +158,11 @@ void MainComponent::resized()
 	// 上部ヘッダー（ボタンなど）
 	auto header = area.removeFromTop(50);
 	playStopButton.setBounds(header.removeFromLeft(100).reduced(5));
-	libraryToggleButton.setBounds(header.removeFromRight(100).reduced(5));
+
+    // ライブラリボタンを右端に
+    libraryToggleButton.setBounds(header.removeFromRight(100).reduced(5));
+    // RECボタンをその左に配置
+    recButton.setBounds(header.removeFromRight(100).reduced(5));
 
 	// ライブラリ表示/非表示（右側からスライドインする形に）
 	if (isLibraryOpen)
