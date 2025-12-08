@@ -97,34 +97,36 @@ void TurntableComponent::paint(juce::Graphics& g)
 	g.fillEllipse(center.x - 4, center.y - 4, 8, 8);
 
 
-	// --- 4. トーンアームの追加描画 ---
+	// --- 4. トーンアームの追加描画（左上基点バージョン） ---
 
-	// ピボット（支点）の位置：レコードの右斜め上あたりに配置
-	// radius * 1.15f = レコードの端から少しだけ離した位置
-	float pivotX = center.x + radius * 1.15f;
-	float pivotY = center.y - radius * 0.8f;
-	juce::Point<float> pivotCenter(pivotX, pivotY);
+	// ピボット（支点）の位置：画面の左上（少し余白を開ける）
+	// 座標(40, 40)あたりに固定します
+	juce::Point<float> pivotCenter(40.0f, 40.0f);
+	float pivotRadius = 25.0f; // 支点の大きさ
 
-	float pivotRadius = radius * 0.15f; // 支点の大きさもレコードに合わせて調整
+	// アームの角度計算
+	// 「支点」から「レコードの中心」に向かう角度を計算し、そこから少しずらして針を落とす
+	// atan2を使うと、動的に「レコードのある方向」を向いてくれます
+	float angleToRecord = std::atan2(center.y - pivotCenter.y, center.x - pivotCenter.x);
+	float armAngle = angleToRecord - 0.15f; // 中心より少し手前（溝）を狙う微調整
 
-	// アームの角度（固定）
-	// ピボット位置が変わったので、角度も少し調整して針がレコードに乗るように見せる
-	float armAngle = juce::MathConstants<float>::pi * 0.12f;
+	// アームの長さ
+	// 支点からレコード中心までの距離の85%くらいの長さにする
+	float distToCenter = pivotCenter.getDistanceFrom(center);
+	float armLength = distToCenter * 0.85f;
+	float armWidth = 15.0f;
 
 	// アーム全体の回転を開始
 	g.saveState();
 	g.addTransform(juce::AffineTransform::rotation(armAngle, pivotCenter.x, pivotCenter.y));
 
 	// A. アーム本体（長い棒）
-	float armWidth = pivotRadius * 0.6f;
-	float armLength = radius * 1.2f; // レコードより少し長く
-
 	g.setColour(juce::Colour::fromString("FFAAAAAA")); // グレー
 	g.fillRoundedRectangle(pivotCenter.x - armWidth/2, pivotCenter.y, armWidth, armLength, armWidth/2);
 
 	// B. カートリッジ（先端の黒い部分）
 	float cartWidth = armWidth * 1.4f;
-	float cartLength = armLength * 0.18f;
+	float cartLength = 45.0f;
 	g.setColour(juce::Colour::fromString("FF333333")); // 黒
 	g.fillRect(pivotCenter.x - cartWidth/2, pivotCenter.y + armLength - cartLength/2, cartWidth, cartLength);
 
