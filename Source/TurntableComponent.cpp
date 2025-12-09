@@ -111,24 +111,28 @@ void TurntableComponent::paint(juce::Graphics& g)
 	float armAngle = angleToRecord - 0.15f; // 中心より少し手前（溝）を狙う微調整
 
 	// アームの長さ
-	// 支点からレコード中心までの距離の85%くらいの長さにする
+	// 支点からレコード中心までの距離から計算し、針先が溝（radius * 0.7あたり）に来るようにする
 	float distToCenter = pivotCenter.getDistanceFrom(center);
-	float armLength = distToCenter * 0.85f;
+	float armLength = distToCenter - (radius * 0.7f);
+	if (armLength < 50.0f) armLength = 50.0f; // 安全策
+
 	float armWidth = 15.0f;
 
 	// アーム全体の回転を開始
 	g.saveState();
 	g.addTransform(juce::AffineTransform::rotation(armAngle, pivotCenter.x, pivotCenter.y));
 
-	// A. アーム本体（長い棒）
+	// A. アーム本体（長い棒） - 右方向（角度0）を基準に描画
 	g.setColour(juce::Colour::fromString("FFAAAAAA")); // グレー
-	g.fillRoundedRectangle(pivotCenter.x - armWidth/2, pivotCenter.y, armWidth, armLength, armWidth/2);
+	g.fillRoundedRectangle(pivotCenter.x, pivotCenter.y - armWidth/2, armLength, armWidth, armWidth/2);
 
 	// B. カートリッジ（先端の黒い部分）
-	float cartWidth = armWidth * 1.4f;
-	float cartLength = 45.0f;
+	float cartWidth = armWidth * 1.4f;  // アームに対して垂直方向の太さ
+	float cartLength = 45.0f;           // アームに沿った長さ
 	g.setColour(juce::Colour::fromString("FF333333")); // 黒
-	g.fillRect(pivotCenter.x - cartWidth/2, pivotCenter.y + armLength - cartLength/2, cartWidth, cartLength);
+
+	// 右端（先端）に配置
+	g.fillRect(pivotCenter.x + armLength - cartLength/2, pivotCenter.y - cartWidth/2, cartLength, cartWidth);
 
 	// 回転終了
 	g.restoreState();
