@@ -66,14 +66,11 @@ void SampleListComponent::buttonClicked(juce::Button* button)
         {
             audioEngine.stopRecording();
             recordButton.setButtonText("Record");
-            updateFileList(); // 録音ファイルをリストに追加（要実装）
+            updateFileList();
         }
         else
         {
-            // 仮のファイル名で録音開始
-            juce::File file = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-                              .getChildFile("recording.wav");
-            audioEngine.startRecording(file);
+            audioEngine.startRecording();
             recordButton.setButtonText("Stop");
         }
     }

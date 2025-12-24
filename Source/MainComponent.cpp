@@ -26,13 +26,49 @@ MainComponent::MainComponent()
     playStopButton.onClick = [this] {
         if (audioEngine.isPlaying()) audioEngine.stop();
         else audioEngine.play();
+        updateButtonColors();
     };
 
     addAndMakeVisible(libraryToggleButton);
     libraryToggleButton.onClick = [this] {
         isLibraryOpen = !isLibraryOpen;
-        resized(); // レイアウト更新
+        isAudioSettingsOpen = false;
+        updateButtonColors();
+        resized();
     };
+
+    addAndMakeVisible(audioSettingsButton);
+    audioSettingsButton.onClick = [this] {
+        isAudioSettingsOpen = !isAudioSettingsOpen;
+        if (isAudioSettingsOpen) {
+            isLibraryOpen = false;
+            audioSelector = std::make_unique<juce::AudioDeviceSelectorComponent>(
+                deviceManager,
+                0, 2, 0, 2, true, true, true, false);
+            addAndMakeVisible(audioSelector.get());
+        } else {
+            audioSelector = nullptr;
+        }
+        updateButtonColors();
+        resized();
+    };
+
+    // RECボタン
+    addAndMakeVisible(recordButton);
+    recordButton.onClick = [this] {
+        if (audioEngine.isRecording()) {
+            audioEngine.stopRecording();
+        } else {
+            audioEngine.startRecording();
+        }
+        updateButtonColors();
+    };
+
+    // ボタン色の初期設定
+    updateButtonColors();
+
+    // 状態更新用タイマー (100ms間隔)
+    startTimer(100);
 
     setSize(800, 600);
 
@@ -47,10 +83,36 @@ MainComponent::MainComponent()
     {
         setAudioChannels(2, 2); // 入力2ch (マイク), 出力2ch
     }
+    // オーディオデバイス設定の読み込み
+    auto settingsFile = getAudioSettingsFile();
+    if (settingsFile.existsAsFile())
+    {
+        auto xml = juce::XmlDocument::parse(settingsFile);
+        if (xml != nullptr)
+            deviceManager.initialise(2, 2, xml.get(), true);
+    }
+}
+
+juce::File MainComponent::getAudioSettingsFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("ScratchMyVoice")
+        .getChildFile("audioSettings.xml");
 }
 
 MainComponent::~MainComponent()
 {
+    stopTimer();
+    
+    // オーディオデバイス設定の保存
+    auto settingsFile = getAudioSettingsFile();
+    settingsFile.getParentDirectory().createDirectory();
+    
+    auto state = deviceManager.createStateXml();
+    if (state != nullptr)
+        state->writeTo(settingsFile, {});
+
+    audioSelector = nullptr;
     shutdownAudio();
 }
 
@@ -61,19 +123,16 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    // 1. まず出力をクリア
-    bufferToFill.clearActiveBufferRegion();
-
-    // 2. マイク入力がある場合、ここにデータが入っています
-    // 録音中なら、この bufferToFill の内容をファイルに書き込む処理が必要です
+    // 1. 録音中ならマイク入力をAudioEngineのバッファに保存
     if (audioEngine.isRecording())
     {
-        // ここでWriterに書き込む処理を追加します
-        // (簡易実装のため省略しますが、入力バッファはここにあります)
+        audioEngine.recordAudioBlock(bufferToFill);
     }
 
-    // 3. AudioEngine（スクラッチ音）の音声をバッファに加算または上書き
-    // これによりスクラッチ音がスピーカーから出ます
+    // 2. 出力をクリア
+    bufferToFill.clearActiveBufferRegion();
+
+    // 3. AudioEngineから再生音を取得
     audioEngine.getNextAudioBlock(bufferToFill);
 }
 
@@ -99,25 +158,29 @@ void MainComponent::resized()
 
 	// 上部ヘッダー（ボタンなど）
 	auto header = area.removeFromTop(50);
-	playStopButton.setBounds(header.removeFromLeft(100).reduced(5));
+	playStopButton.setBounds(header.removeFromLeft(80).reduced(5));
+	recordButton.setBounds(header.removeFromLeft(80).reduced(5));
 	libraryToggleButton.setBounds(header.removeFromRight(100).reduced(5));
+	audioSettingsButton.setBounds(header.removeFromRight(100).reduced(5));
 
-	// ライブラリ表示/非表示（右側からスライドインする形に）
+	// ライブラリ表示/非表示
 	if (isLibraryOpen)
 	{
-		// 画面全体を使わず、右側200pxだけにするのではなく、オーバーレイ的に配置
-		// ここでは簡単に、下半分をライブラリにする例
-		// sampleList->setBounds(area.removeFromBottom(200));
-
-		// 元のロジックだと右側を切り取っていたので、ターンテーブルが狭くなっていました。
-		// ここでは「ライブラリが開いている時はリストを前面に出す」ようなロジックに変えるのが一般的ですが、
-		// いったん「右端」を少し狭くします。
 		sampleList->setBounds(area.removeFromRight(150));
 	}
 	else
 	{
-		// ライブラリが閉じているなら、sampleListは見えなくていい（またはサイズ0）
 		sampleList->setBounds(0, 0, 0, 0);
+	}
+
+	// オーディオ設定パネル表示/非表示
+	if (isAudioSettingsOpen && audioSelector != nullptr)
+	{
+		audioSelector->setBounds(area.removeFromRight(300));
+	}
+	else if (audioSelector != nullptr)
+	{
+		audioSelector->setBounds(0, 0, 0, 0);
 	}
 
 	// 残りのエリアを分割
@@ -131,4 +194,71 @@ void MainComponent::resized()
 void MainComponent::buttonClicked(juce::Button* button)
 {
     // リスナー実装 (Lambdaを使ったのでここは空でもOKですが、SampleListComponent用などに残しています)
+}
+
+void MainComponent::timerCallback()
+{
+    updateButtonColors();
+}
+
+void MainComponent::updateButtonColors()
+{
+    // 色の定義
+    const auto greenActive = juce::Colour::fromString("FF22C55E");   // 再生中の緑
+    const auto blueActive = juce::Colour::fromString("FF3B82F6");    // パネル開のブルー
+    const auto redActive = juce::Colour::fromString("FFEF4444");     // 録音中の赤
+    const auto defaultBg = juce::Colour::fromString("FF334155");     // デフォルト背景
+    const auto defaultText = juce::Colours::white;
+    
+    // PLAY/STOP ボタン
+    if (audioEngine.isPlaying())
+    {
+        playStopButton.setButtonText("STOP");
+        playStopButton.setColour(juce::TextButton::buttonColourId, greenActive);
+        playStopButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    }
+    else
+    {
+        playStopButton.setButtonText("PLAY");
+        playStopButton.setColour(juce::TextButton::buttonColourId, defaultBg);
+        playStopButton.setColour(juce::TextButton::textColourOffId, defaultText);
+    }
+    
+    // REC ボタン
+    if (audioEngine.isRecording())
+    {
+        recordButton.setButtonText("STOP");
+        recordButton.setColour(juce::TextButton::buttonColourId, redActive);
+        recordButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    }
+    else
+    {
+        recordButton.setButtonText("REC");
+        recordButton.setColour(juce::TextButton::buttonColourId, defaultBg);
+        recordButton.setColour(juce::TextButton::textColourOffId, defaultText);
+    }
+    
+    // Library ボタン
+    if (isLibraryOpen)
+    {
+        libraryToggleButton.setColour(juce::TextButton::buttonColourId, blueActive);
+        libraryToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    }
+    else
+    {
+        libraryToggleButton.setColour(juce::TextButton::buttonColourId, defaultBg);
+        libraryToggleButton.setColour(juce::TextButton::textColourOffId, defaultText);
+    }
+    
+    // Audio Settings ボタン
+    if (isAudioSettingsOpen)
+    {
+        audioSettingsButton.setColour(juce::TextButton::buttonColourId, blueActive);
+        audioSettingsButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    }
+    else
+    {
+        audioSettingsButton.setColour(juce::TextButton::buttonColourId, defaultBg);
+        audioSettingsButton.setColour(juce::TextButton::textColourOffId, defaultText);
+    }
 }

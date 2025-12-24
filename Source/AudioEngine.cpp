@@ -6,9 +6,13 @@
 #include "AudioEngine.h"
 
 AudioEngine::AudioEngine()
-: thumbnail(512, formatManager, thumbnailCache) // ← これを追加！
+: thumbnail(512, formatManager, thumbnailCache)
 {
 	formatManager.registerBasicFormats();
+	
+	// 録音バッファを初期化（最大30秒分）
+	recordedBuffer.setSize(2, 44100 * 30);
+	recordedBuffer.clear();
 }
 
 AudioEngine::~AudioEngine()
@@ -18,9 +22,15 @@ AudioEngine::~AudioEngine()
 
 void AudioEngine::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
+    currentSampleRate = sampleRate;
     transportSource.prepareToPlay(samplesPerBlockExpected, sampleRate);
     
-    // リサンプラーの初期化（スクラッチ用）
+    // 録音バッファのサイズを現在のサンプルレートに合わせる（30秒分）
+    int maxSamples = static_cast<int>(sampleRate * 30.0);
+    recordedBuffer.setSize(2, maxSamples, true, true, true);
+    
+    crossfaderGain.reset(sampleRate, 0.01); // 10msスムージング
+    
     if (resamplerSource)
         resamplerSource->prepareToPlay(samplesPerBlockExpected, sampleRate);
 }
@@ -34,20 +44,71 @@ void AudioEngine::releaseResources()
 
 void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    if (resamplerSource)
+    // 録音中は入力をバッファに記録（MainComponentで呼び出される）
+    
+    // 再生中は録音バッファからスクラッチ再生
+    if (playing && recordedBuffer.getNumSamples() > 0 && recordWritePosition > 0)
     {
-        // スクラッチ（リサンプラー）経由で再生
-        resamplerSource->getNextAudioBlock(bufferToFill);
+        auto* outputBuffer = bufferToFill.buffer;
+        int numSamplesToFill = bufferToFill.numSamples;
+        int numChannels = juce::jmin(outputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
+        
+        for (int sample = 0; sample < numSamplesToFill; ++sample)
+        {
+            // 現在の再生位置からサンプルを取得
+            int readPos = static_cast<int>(playbackPosition);
+            
+            // バッファ範囲内に収める
+            if (readPos >= 0 && readPos < recordWritePosition)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    float sampleValue = recordedBuffer.getSample(ch, readPos);
+                    outputBuffer->addSample(ch, bufferToFill.startSample + sample, sampleValue * crossfaderGain.getNextValue());
+                }
+            }
+            
+            // 再生位置を進める
+            playbackPosition += scratchSpeed;
+            
+            // ループ再生（録音範囲内でループ）
+            if (playbackPosition >= recordWritePosition)
+                playbackPosition = 0.0;
+            else if (playbackPosition < 0.0)
+                playbackPosition = recordWritePosition - 1;
+        }
     }
     else
     {
-        bufferToFill.clearActiveBufferRegion();
+        // 再生していない場合、クロスフェーダーのスムーズ値を更新
+        for (int i = 0; i < bufferToFill.numSamples; ++i)
+            crossfaderGain.getNextValue();
     }
+}
 
-    // クロスフェーダーのゲイン適用
-    float gain = crossfaderGain.getCurrentValue(); // ここでスムーズなゲインを取得
-    // ※今回は簡易的に全体ゲインとして適用（本来はA/Bデッキのバランスですが、コードに合わせています）
-    bufferToFill.buffer->applyGain(bufferToFill.startSample, bufferToFill.numSamples, 1.0f); 
+void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
+{
+    if (!recordingState) return;
+    
+    auto* inputBuffer = bufferToFill.buffer;
+    int numSamples = bufferToFill.numSamples;
+    int numChannels = juce::jmin(inputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
+    
+    // バッファに余裕があれば書き込み
+    if (recordWritePosition + numSamples <= recordedBuffer.getNumSamples())
+    {
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            recordedBuffer.copyFrom(ch, recordWritePosition,
+                                    *inputBuffer, ch, bufferToFill.startSample, numSamples);
+        }
+        recordWritePosition += numSamples;
+    }
+    else
+    {
+        // バッファがいっぱいになったら録音停止
+        stopRecording();
+    }
 }
 
 void AudioEngine::loadFile(const juce::File& file)
@@ -59,32 +120,29 @@ void AudioEngine::loadFile(const juce::File& file)
         transportSource.setSource(newSource.get(), 0, nullptr, reader->sampleRate);
         readerSource.reset(newSource.release());
         
-        // リサンプラーにTransportSourceをラップさせる
         resamplerSource.reset(new juce::ResamplingAudioSource(&transportSource, false, 2));
         
-        // サムネイルの更新通知
         sendChangeMessage(); 
     }
 }
 
 void AudioEngine::play()
 {
-    transportSource.start();
+    if (hasRecordedAudio())
+    {
+        playing = true;
+        scratchSpeed = 1.0;
+    }
 }
 
 void AudioEngine::stop()
 {
-    transportSource.stop();
+    playing = false;
 }
 
 void AudioEngine::setScratchRate(double rate)
 {
-    if (resamplerSource)
-    {
-        // rateが1.0で等速、負の値で逆再生、0に近いほど遅くなる
-        // 0.0で停止しないように少し工夫が必要ですが、基本はこれで動きます
-        resamplerSource->setResamplingRatio(rate > 0 ? 1.0 / rate : 1.0);
-    }
+    scratchSpeed = rate;
 }
 
 void AudioEngine::setCrossfaderGain(float gain)
@@ -92,17 +150,41 @@ void AudioEngine::setCrossfaderGain(float gain)
     crossfaderGain.setTargetValue(gain);
 }
 
-// 注: 簡易実装です。本格的な録音は非同期スレッド（TimeSliceThread）を使う必要があります。
-void AudioEngine::startRecording(const juce::File& file)
+void AudioEngine::startRecording()
 {
-    // 録音準備のロジック（ここではフラグ管理のみ）
+    recordWritePosition = 0;
+    recordedBuffer.clear();
     recordingState = true;
-    // 実際のファイル書き込み準備はMainComponent側でAudioFormatWriterを作るのが一般的です
+    playing = false; // 録音中は再生停止
+    sendChangeMessage();
 }
 
 void AudioEngine::stopRecording()
 {
     recordingState = false;
+    playbackPosition = 0.0;
+    sendChangeMessage();
+}
+
+void AudioEngine::setPlaybackPosition(double normalizedPosition)
+{
+    if (recordWritePosition > 0)
+    {
+        playbackPosition = normalizedPosition * recordWritePosition;
+        playbackPosition = juce::jlimit(0.0, static_cast<double>(recordWritePosition - 1), playbackPosition);
+    }
+}
+
+double AudioEngine::getPlaybackPosition() const
+{
+    if (recordWritePosition > 0)
+        return playbackPosition / recordWritePosition;
+    return 0.0;
+}
+
+void AudioEngine::setScratchSpeed(double speed)
+{
+    scratchSpeed = speed;
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)

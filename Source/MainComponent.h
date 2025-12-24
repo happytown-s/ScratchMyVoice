@@ -11,7 +11,7 @@
 #include "CrossfaderComponent.h"
 #include "SampleListComponent.h"
 
-class MainComponent : public juce::AudioAppComponent, public juce::Button::Listener
+class MainComponent : public juce::AudioAppComponent, public juce::Button::Listener, public juce::Timer
 {
 	public:
 	MainComponent();
@@ -25,6 +25,7 @@ class MainComponent : public juce::AudioAppComponent, public juce::Button::Liste
 	void resized() override;
 
 	void buttonClicked(juce::Button* button) override;
+	void timerCallback() override;
 
 	private:
 	// Core Engine
@@ -38,9 +39,19 @@ class MainComponent : public juce::AudioAppComponent, public juce::Button::Liste
 
 	// Layout Controls
 	juce::TextButton libraryToggleButton { "Library" };
-	juce::TextButton playStopButton { "START/STOP" };
+	juce::TextButton playStopButton { "PLAY" };
+	juce::TextButton audioSettingsButton { "Audio" };
+	juce::TextButton recordButton { "REC" };
 
 	bool isLibraryOpen = true;
+
+	// Audio Settings
+	std::unique_ptr<juce::AudioDeviceSelectorComponent> audioSelector;
+	bool isAudioSettingsOpen = false;
+	juce::File getAudioSettingsFile() const;
+
+	// Helper
+	void updateButtonColors();
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

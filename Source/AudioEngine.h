@@ -27,17 +27,29 @@ public juce::ChangeBroadcaster
 	void setScratchRate(double rate); // Controls playback speed/pitch
 	void setCrossfaderGain(float gain); // 0.0 (Silent) to 1.0 (Thru)
 
-	// Recording
-	void startRecording(const juce::File& file);
+	// Recording - マイクから録音してバッファに保存
+	void startRecording();
 	void stopRecording();
+	void recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill);
 	bool isRecording() const { return recordingState; }
+	bool hasRecordedAudio() const { return recordedBuffer.getNumSamples() > 0; }
+
+	// Scratch playback - 録音したバッファをスクラッチ再生
+	void setPlaybackPosition(double normalizedPosition); // 0.0〜1.0
+	double getPlaybackPosition() const;
+	void setScratchSpeed(double speed); // 負の値で逆再生
 
 	// Getters for Visualizers
 	juce::AudioTransportSource& getTransportSource() { return transportSource; }
 	juce::AudioThumbnail& getThumbnail() { return thumbnail; }
 	double getCurrentPosition() { return transportSource.getCurrentPosition(); }
 	double getLengthInSeconds() { return transportSource.getLengthInSeconds(); }
-	bool isPlaying() const { return transportSource.isPlaying(); }
+	bool isPlaying() const { return playing; }
+	
+	// 録音バッファへのアクセス（波形表示用）
+	const juce::AudioBuffer<float>& getRecordedBuffer() const { return recordedBuffer; }
+	double getRecordedSampleRate() const { return currentSampleRate; }
+	int getRecordedSamplesCount() const { return recordWritePosition; } // 実際に録音されたサンプル数
 
 	// ChangeListener
 	void changeListenerCallback(juce::ChangeBroadcaster* source) override;
@@ -53,12 +65,18 @@ public juce::ChangeBroadcaster
 	juce::AudioThumbnail thumbnail;
 
 	// Crossfader
-	juce::LinearSmoothedValue<float> crossfaderGain { 0.0f };
+	juce::LinearSmoothedValue<float> crossfaderGain { 1.0f };
 
-	// Recording
+	// Recording buffer
 	bool recordingState = false;
-	// Note: Actual recording logic in JUCE requires an AudioIODeviceCallback or AudioRecorder class.
-	// For brevity, we assume AudioEngine manages the AudioDeviceManager instance internally.
+	juce::AudioBuffer<float> recordedBuffer;
+	int recordWritePosition = 0;
+	double currentSampleRate = 44100.0;
+	
+	// Playback state
+	bool playing = false;
+	double playbackPosition = 0.0; // サンプル位置
+	double scratchSpeed = 1.0;     // 再生速度（1.0=通常、負で逆再生）
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

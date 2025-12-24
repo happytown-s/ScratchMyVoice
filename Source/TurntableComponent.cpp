@@ -97,23 +97,30 @@ void TurntableComponent::paint(juce::Graphics& g)
 	g.fillEllipse(center.x - 4, center.y - 4, 8, 8);
 
 
-	// --- 4. トーンアームの追加描画（左上基点バージョン） ---
+	// --- 4. トーンアームの追加描画（右上基点バージョン） ---
 
-	// ピボット（支点）の位置：画面の左上（少し余白を開ける）
-	// 座標(40, 40)あたりに固定します
-	juce::Point<float> pivotCenter(40.0f, 40.0f);
+	// ピボット（支点）の位置：画面の右上
+	juce::Point<float> pivotCenter(area.getRight() - 40.0f, 40.0f);
 	float pivotRadius = 25.0f; // 支点の大きさ
 
 	// アームの角度計算
-	// 「支点」から「レコードの中心」に向かう角度を計算し、そこから少しずらして針を落とす
-	// atan2を使うと、動的に「レコードのある方向」を向いてくれます
+	// 「支点」から「レコードの中心」に向かう角度を計算
 	float angleToRecord = std::atan2(center.y - pivotCenter.y, center.x - pivotCenter.x);
-	float armAngle = angleToRecord - 0.15f; // 中心より少し手前（溝）を狙う微調整
+	
+	// 再生中は針がレコードの溝に乗る、停止中は外側に持ち上がる
+	float armAngle;
+	if (audioEngine.isPlaying() || isDragging) {
+		// 再生中: 針先がレコードの溝（外周から1/3程度の位置）に乗る角度
+		armAngle = angleToRecord + 0.20f;
+	} else {
+		// 停止中: 針がレコードから離れた位置（右上に持ち上がる）
+		armAngle = angleToRecord - 0.35f;
+	}
 
 	// アームの長さ
-	// 支点からレコード中心までの距離の85%くらいの長さにする
+	// 支点からレコード中心までの距離を基準に、先端がレコードに届くように調整
 	float distToCenter = pivotCenter.getDistanceFrom(center);
-	float armLength = distToCenter * 0.85f;
+	float armLength = distToCenter * 0.90f; // 長めにして確実に届くように
 	float armWidth = 15.0f;
 
 	// アーム全体の回転を開始
@@ -150,7 +157,8 @@ void TurntableComponent::mouseDown(const juce::MouseEvent& e)
 {
 	isDragging = true;
 	lastAngle = getAngleFromPoint(e.position);
-	audioEngine.setScratchRate(0.0); // ドラッグ中は一時的に止める等の処理
+	lastTime = juce::Time::getMillisecondCounterHiRes();
+	audioEngine.setScratchSpeed(0.0); // ドラッグ開始時は停止
 }
 
 void TurntableComponent::mouseDrag(const juce::MouseEvent& e)
@@ -165,23 +173,49 @@ void TurntableComponent::mouseDrag(const juce::MouseEvent& e)
 	if (diff > juce::MathConstants<float>::pi) diff -= juce::MathConstants<float>::twoPi;
 
 	rotationAngle += diff;
+	
+	// 時間差から速度を計算
+	double currentTime = juce::Time::getMillisecondCounterHiRes();
+	double timeDiff = currentTime - lastTime;
+	
+	if (timeDiff > 0)
+	{
+		// 角度変化を速度に変換（正の値で順再生、負で逆再生）
+		// 感度調整: diff * 定数
+		double scratchSpeed = (diff / juce::MathConstants<float>::pi) * 8.0;
+		
+		// 速度の範囲を制限
+		scratchSpeed = juce::jlimit(-4.0, 4.0, scratchSpeed);
+		
+		audioEngine.setScratchSpeed(scratchSpeed);
+	}
+	
 	lastAngle = currentAngle;
-
-	// ここでaudioEngineにスクラッチ速度を送る処理が入ります
+	lastTime = currentTime;
+	
 	repaint();
 }
 
 void TurntableComponent::mouseUp(const juce::MouseEvent& e)
 {
 	isDragging = false;
-	audioEngine.setScratchRate(1.0); // 再生再開（仮）
+	// マウスを離したら通常再生速度に戻す
+	if (audioEngine.isPlaying())
+		audioEngine.setScratchSpeed(1.0);
+	else
+		audioEngine.setScratchSpeed(0.0);
 }
 
 void TurntableComponent::timerCallback()
 {
 	if (!isDragging && audioEngine.isPlaying())
 	{
-		rotationAngle += 0.05f; // 自動回転
+		// 再生中は自動回転
+		rotationAngle += 0.05f;
+		repaint();
+	}
+	else if (isDragging)
+	{
 		repaint();
 	}
 }
@@ -193,6 +227,9 @@ void TurntableComponent::setExpanded(bool shouldExpand)
 
 float TurntableComponent::getAngleFromPoint(juce::Point<float> p)
 {
-	auto center = getLocalBounds().toFloat().getCentre();
+	auto area = getLocalBounds().toFloat();
+	auto discBounds = area.removeFromLeft(area.getWidth() * 0.85f).reduced(10);
+	auto center = discBounds.getCentre();
 	return std::atan2(p.y - center.y, p.x - center.x);
 }
+
