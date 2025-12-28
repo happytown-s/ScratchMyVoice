@@ -227,11 +227,11 @@ void TurntableComponent::mouseDrag(const juce::MouseEvent& e)
 	if (timeDiff > 0)
 	{
 		// 角度変化を速度に変換（正の値で順再生、負で逆再生）
-		// 感度調整: diff * 定数
-		double scratchSpeed = (diff / juce::MathConstants<float>::pi) * 8.0;
+		// 感度調整: 高めに設定してレスポンスを向上
+		double scratchSpeed = (diff / juce::MathConstants<float>::pi) * 16.0;
 		
-		// 速度の範囲を制限
-		scratchSpeed = juce::jlimit(-4.0, 4.0, scratchSpeed);
+		// 速度の範囲を制限（より広い範囲に）
+		scratchSpeed = juce::jlimit(-8.0, 8.0, scratchSpeed);
 		
 		audioEngine.setScratchSpeed(scratchSpeed);
 	}

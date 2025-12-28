@@ -44,8 +44,6 @@ void AudioEngine::releaseResources()
 
 void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    // 録音中は入力をバッファに記録（MainComponentで呼び出される）
-    
     // 再生中は録音バッファからスクラッチ再生
     if (playing && recordedBuffer.getNumSamples() > 0 && recordWritePosition > 0)
     {
@@ -55,21 +53,29 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
         
         for (int sample = 0; sample < numSamplesToFill; ++sample)
         {
-            // 現在の再生位置からサンプルを取得
-            int readPos = static_cast<int>(playbackPosition);
+            // 線形補間のためのインデックスと係数を計算
+            int pos0 = static_cast<int>(playbackPosition);
+            int pos1 = pos0 + 1;
+            float frac = static_cast<float>(playbackPosition - pos0);
             
-            // バッファ範囲内に収める
-            if (readPos >= 0 && readPos < recordWritePosition)
+            // バッファ範囲内にクランプ
+            pos0 = juce::jlimit(0, recordWritePosition - 1, pos0);
+            pos1 = juce::jlimit(0, recordWritePosition - 1, pos1);
+            
+            float gain = crossfaderGain.getNextValue();
+            
+            for (int ch = 0; ch < numChannels; ++ch)
             {
-                for (int ch = 0; ch < numChannels; ++ch)
-                {
-                    float sampleValue = recordedBuffer.getSample(ch, readPos);
-                    outputBuffer->addSample(ch, bufferToFill.startSample + sample, sampleValue * crossfaderGain.getNextValue());
-                }
+                // 線形補間でサンプル値を計算（ノイズ軽減）
+                float sample0 = recordedBuffer.getSample(ch, pos0);
+                float sample1 = recordedBuffer.getSample(ch, pos1);
+                float interpolatedSample = sample0 + frac * (sample1 - sample0);
+                
+                outputBuffer->addSample(ch, bufferToFill.startSample + sample, interpolatedSample * gain);
             }
             
-            // 再生位置を進める
-            playbackPosition += scratchSpeed;
+            // 再生位置を進める（スムーズなスピード変化）
+            playbackPosition += targetScratchSpeed;
             
             // ループ再生（録音範囲内でループ）
             if (playbackPosition >= recordWritePosition)
@@ -131,7 +137,7 @@ void AudioEngine::play()
     if (hasRecordedAudio())
     {
         playing = true;
-        scratchSpeed = 1.0;
+        targetScratchSpeed = 1.0;
     }
 }
 
@@ -142,7 +148,7 @@ void AudioEngine::stop()
 
 void AudioEngine::setScratchRate(double rate)
 {
-    scratchSpeed = rate;
+    targetScratchSpeed = rate;
 }
 
 void AudioEngine::setCrossfaderGain(float gain)
@@ -184,7 +190,7 @@ double AudioEngine::getPlaybackPosition() const
 
 void AudioEngine::setScratchSpeed(double speed)
 {
-    scratchSpeed = speed;
+    targetScratchSpeed = speed;
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)

@@ -76,7 +76,8 @@ public juce::ChangeBroadcaster
 	// Playback state
 	bool playing = false;
 	double playbackPosition = 0.0; // サンプル位置
-	double scratchSpeed = 1.0;     // 再生速度（1.0=通常、負で逆再生）
+	double targetScratchSpeed = 1.0;     // 目標再生速度
+	double currentScratchSpeed = 1.0;    // 現在の再生速度（スムーズ変化用）
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };
