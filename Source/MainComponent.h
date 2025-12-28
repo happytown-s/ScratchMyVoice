@@ -43,7 +43,7 @@ class MainComponent : public juce::AudioAppComponent, public juce::Button::Liste
 	juce::TextButton audioSettingsButton { "Audio" };
 	juce::TextButton recordButton { "REC" };
 
-	bool isLibraryOpen = true;
+	bool isLibraryOpen = false;
 
 	// Audio Settings
 	std::unique_ptr<juce::AudioDeviceSelectorComponent> audioSelector;

@@ -196,7 +196,12 @@ void MainComponent::resized()
 
 	// 残りのエリアを分割
 	auto bottomControl = area.removeFromBottom(bottomControlHeight);
-	crossfader->setBounds(bottomControl.removeFromBottom(crossfaderHeight).reduced(10, 5));
+	
+	// クロスフェーダーを中央に配置（幅は1/3、高さは1.5倍）
+	const int crossfaderActualHeight = static_cast<int>(crossfaderHeight * 1.5f);
+	auto crossfaderArea = bottomControl.removeFromBottom(crossfaderActualHeight);
+	const int crossfaderWidth = juce::jmin(crossfaderArea.getWidth() / 2, 350); // 幅1/2、最大350px
+	crossfader->setBounds(crossfaderArea.withSizeKeepingCentre(crossfaderWidth, crossfaderActualHeight - 6));
 
 	waveform->setBounds(bottomControl); // 波形表示
 	turntable->setBounds(area); // 残りすべてをターンテーブルに
