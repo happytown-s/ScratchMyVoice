@@ -70,7 +70,8 @@ MainComponent::MainComponent()
     // 状態更新用タイマー (100ms間隔)
     startTimer(100);
 
-    setSize(800, 600);
+    // タブレット横画面に最適化したサイズ
+    setSize(1024, 768);
 
     // 録音権限の要求 (モバイルや最近のmacOSで必須)
     if (juce::RuntimePermissions::isRequired (juce::RuntimePermissions::recordAudio)
@@ -149,24 +150,34 @@ void MainComponent::paint(juce::Graphics& g)
 void MainComponent::resized()
 {
 	auto area = getLocalBounds();
+	const int width = getWidth();
+	const int height = getHeight();
+
+	// 【レスポンシブ設定】画面サイズに応じたパラメータ
+	const int headerHeight = juce::jmax(50, height / 15);  // 最低50px、高さの1/15
+	const int buttonWidth = juce::jmax(70, width / 12);    // 最低70px、幅の1/12
+	const int sidebarWidth = juce::jmax(150, width / 6);   // 最低150px、幅の1/6
+	const int audioSettingsWidth = juce::jmax(280, width / 4); // 最低280px、幅の1/4
+	const int bottomControlHeight = juce::jmax(100, height / 7); // 最低100px、高さの1/7
+	const int crossfaderHeight = juce::jmax(50, height / 14); // 最低50px、高さの1/14
 
 	// 【重要】スマホの上部ノッチ（ステータスバー）を避けるための余白
-	// 本当は getSafeInsets() を使いますが、手っ取り早く上を空けます
 #if JUCE_IOS
 	area.removeFromTop(40); // 40px下げる
 #endif
 
 	// 上部ヘッダー（ボタンなど）
-	auto header = area.removeFromTop(50);
-	playStopButton.setBounds(header.removeFromLeft(80).reduced(5));
-	recordButton.setBounds(header.removeFromLeft(80).reduced(5));
-	libraryToggleButton.setBounds(header.removeFromRight(100).reduced(5));
-	audioSettingsButton.setBounds(header.removeFromRight(100).reduced(5));
+	auto header = area.removeFromTop(headerHeight);
+	const int buttonPadding = 5;
+	playStopButton.setBounds(header.removeFromLeft(buttonWidth).reduced(buttonPadding));
+	recordButton.setBounds(header.removeFromLeft(buttonWidth).reduced(buttonPadding));
+	libraryToggleButton.setBounds(header.removeFromRight(buttonWidth + 20).reduced(buttonPadding));
+	audioSettingsButton.setBounds(header.removeFromRight(buttonWidth + 20).reduced(buttonPadding));
 
 	// ライブラリ表示/非表示
 	if (isLibraryOpen)
 	{
-		sampleList->setBounds(area.removeFromRight(150));
+		sampleList->setBounds(area.removeFromRight(sidebarWidth));
 	}
 	else
 	{
@@ -176,7 +187,7 @@ void MainComponent::resized()
 	// オーディオ設定パネル表示/非表示
 	if (isAudioSettingsOpen && audioSelector != nullptr)
 	{
-		audioSelector->setBounds(area.removeFromRight(300));
+		audioSelector->setBounds(area.removeFromRight(audioSettingsWidth));
 	}
 	else if (audioSelector != nullptr)
 	{
@@ -184,11 +195,11 @@ void MainComponent::resized()
 	}
 
 	// 残りのエリアを分割
-	auto bottomControl = area.removeFromBottom(120); // 下部を少し広めに
-	crossfader->setBounds(bottomControl.removeFromBottom(60).reduced(10, 5));
+	auto bottomControl = area.removeFromBottom(bottomControlHeight);
+	crossfader->setBounds(bottomControl.removeFromBottom(crossfaderHeight).reduced(10, 5));
 
 	waveform->setBounds(bottomControl); // 波形表示
-	turntable->setBounds(area); // 残りすべてをターンテーブルに（これで広くなる！）
+	turntable->setBounds(area); // 残りすべてをターンテーブルに
 }
 
 void MainComponent::buttonClicked(juce::Button* button)
