@@ -196,4 +196,74 @@ void AudioEngine::setScratchSpeed(double speed)
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     // 必要に応じて実装
+    juce::ignoreUnused(source);
+}
+
+juce::File AudioEngine::getLibraryFolder() const
+{
+    // アプリケーションデータフォルダ内にライブラリフォルダを作成
+    auto folder = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("ScratchMyVoice")
+        .getChildFile("Library");
+    
+    if (!folder.exists())
+        folder.createDirectory();
+    
+    return folder;
+}
+
+juce::File AudioEngine::saveRecordingToFile()
+{
+    if (recordWritePosition <= 0)
+        return juce::File();
+    
+    auto libraryFolder = getLibraryFolder();
+    
+    // タイムスタンプでファイル名を生成
+    auto now = juce::Time::getCurrentTime();
+    auto fileName = now.formatted("Recording_%Y%m%d_%H%M%S.wav");
+    auto outputFile = libraryFolder.getChildFile(fileName);
+    
+    // WAVファイルとして保存
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        wavFormat.createWriterFor(
+            new juce::FileOutputStream(outputFile),
+            currentSampleRate,
+            static_cast<unsigned int>(recordedBuffer.getNumChannels()),
+            16, // bits per sample
+            {},
+            0
+        )
+    );
+    
+    if (writer != nullptr)
+    {
+        writer->writeFromAudioSampleBuffer(recordedBuffer, 0, recordWritePosition);
+        return outputFile;
+    }
+    
+    return juce::File();
+}
+
+void AudioEngine::loadFileToBuffer(const juce::File& file)
+{
+    auto* reader = formatManager.createReaderFor(file);
+    if (reader != nullptr)
+    {
+        // 録音バッファにファイルの内容をロード
+        int numSamples = static_cast<int>(reader->lengthInSamples);
+        int numChannels = static_cast<int>(reader->numChannels);
+        
+        recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
+        reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
+        
+        recordWritePosition = numSamples;
+        currentSampleRate = reader->sampleRate;
+        playbackPosition = 0.0;
+        
+        delete reader;
+        
+        sendChangeMessage();
+    }
 }

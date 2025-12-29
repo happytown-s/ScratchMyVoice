@@ -50,6 +50,13 @@ public juce::ChangeBroadcaster
 	const juce::AudioBuffer<float>& getRecordedBuffer() const { return recordedBuffer; }
 	double getRecordedSampleRate() const { return currentSampleRate; }
 	int getRecordedSamplesCount() const { return recordWritePosition; } // 実際に録音されたサンプル数
+	
+	// ライブラリフォルダへの保存
+	juce::File getLibraryFolder() const;
+	juce::File saveRecordingToFile(); // 録音データをWAVとして保存し、ファイルを返す
+	
+	// ファイルから録音バッファにロード（スクラッチ再生用）
+	void loadFileToBuffer(const juce::File& file);
 
 	// ChangeListener
 	void changeListenerCallback(juce::ChangeBroadcaster* source) override;
