@@ -21,6 +21,24 @@ MainComponent::MainComponent()
     sampleList = std::make_unique<SampleListComponent>(audioEngine);
     addAndMakeVisible(sampleList.get());
 
+    sampleSlots = std::make_unique<SampleSlotComponent>(audioEngine);
+    sampleSlots->setSlotAssignCallback([this](int slotIndex) {
+        // ライブラリで選択中のファイルをスロットにロード
+        auto selectedFile = sampleList->getSelectedFile();
+        DBG("Slot " << slotIndex << " clicked, selected file: " << selectedFile.getFullPathName());
+        if (selectedFile.existsAsFile())
+        {
+            DBG("Loading file to slot " << slotIndex);
+            audioEngine.loadFileToSlot(slotIndex, selectedFile);
+            sampleList->clearSelection(); // スロットへロード後、選択を解除
+        }
+        else
+        {
+            DBG("No file selected or file doesn't exist");
+        }
+    });
+    addAndMakeVisible(sampleSlots.get());
+
     // ボタン設定
     addAndMakeVisible(playStopButton);
     playStopButton.onClick = [this] {
@@ -58,6 +76,11 @@ MainComponent::MainComponent()
     recordButton.onClick = [this] {
         if (audioEngine.isRecording()) {
             audioEngine.stopRecording();
+            // 録音データをファイルに保存してライブラリを更新
+            auto savedFile = audioEngine.saveRecordingToFile();
+            if (savedFile.existsAsFile()) {
+                sampleList->refreshLibrary();
+            }
         } else {
             audioEngine.startRecording();
         }
@@ -71,7 +94,7 @@ MainComponent::MainComponent()
     startTimer(100);
 
     // タブレット横画面に最適化したサイズ
-    setSize(1024, 768);
+    setSize(824, 768);
 
     // 録音権限の要求 (モバイルや最近のmacOSで必須)
     if (juce::RuntimePermissions::isRequired (juce::RuntimePermissions::recordAudio)
@@ -204,7 +227,12 @@ void MainComponent::resized()
 	crossfader->setBounds(crossfaderArea.withSizeKeepingCentre(crossfaderWidth, crossfaderActualHeight - 6));
 
 	waveform->setBounds(bottomControl); // 波形表示
-	turntable->setBounds(area); // 残りすべてをターンテーブルに
+	
+	// サンプルスロットを左側に配置
+	const int slotWidth = juce::jmax(80, width / 12);
+	sampleSlots->setBounds(area.removeFromLeft(slotWidth));
+	
+	turntable->setBounds(area); // 残りをターンテーブルに
 }
 
 void MainComponent::buttonClicked(juce::Button* button)

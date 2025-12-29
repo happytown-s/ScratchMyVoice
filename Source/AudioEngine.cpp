@@ -267,3 +267,64 @@ void AudioEngine::loadFileToBuffer(const juce::File& file)
         sendChangeMessage();
     }
 }
+
+// --- Sample Slots Implementation ---
+
+void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
+{
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
+    
+    auto* reader = formatManager.createReaderFor(file);
+    if (reader != nullptr)
+    {
+        int numSamples = static_cast<int>(reader->lengthInSamples);
+        int numChannels = static_cast<int>(reader->numChannels);
+        
+        auto& slot = sampleSlots[static_cast<size_t>(slotIndex)];
+        slot.buffer.setSize(juce::jmax(2, numChannels), numSamples);
+        reader->read(&slot.buffer, 0, numSamples, 0, true, true);
+        slot.numSamples = numSamples;
+        slot.fileName = file.getFileNameWithoutExtension();
+        
+        delete reader;
+        
+        // アクティブスロットならメインバッファにもコピー
+        if (slotIndex == activeSlotIndex)
+        {
+            setActiveSlot(slotIndex);
+        }
+        
+        sendChangeMessage();
+    }
+}
+
+void AudioEngine::setActiveSlot(int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
+    
+    activeSlotIndex = slotIndex;
+    
+    const auto& slot = sampleSlots[static_cast<size_t>(slotIndex)];
+    if (slot.numSamples > 0)
+    {
+        // スロットのバッファをメイン再生バッファにコピー
+        recordedBuffer.makeCopyOf(slot.buffer);
+        recordWritePosition = slot.numSamples;
+        playbackPosition = 0.0;
+        
+        sendChangeMessage();
+    }
+}
+
+juce::String AudioEngine::getSlotFileName(int slotIndex) const
+{
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return "";
+    return sampleSlots[static_cast<size_t>(slotIndex)].fileName;
+}
+
+bool AudioEngine::isSlotLoaded(int slotIndex) const
+{
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return false;
+    return sampleSlots[static_cast<size_t>(slotIndex)].numSamples > 0;
+}
+

@@ -58,6 +58,14 @@ public juce::ChangeBroadcaster
 	// ファイルから録音バッファにロード（スクラッチ再生用）
 	void loadFileToBuffer(const juce::File& file);
 
+	// --- Sample Slots (A/B/C/D) ---
+	static constexpr int NUM_SLOTS = 4;
+	void loadFileToSlot(int slotIndex, const juce::File& file);
+	void setActiveSlot(int slotIndex);
+	int getActiveSlot() const { return activeSlotIndex; }
+	juce::String getSlotFileName(int slotIndex) const;
+	bool isSlotLoaded(int slotIndex) const;
+
 	// ChangeListener
 	void changeListenerCallback(juce::ChangeBroadcaster* source) override;
 
@@ -85,6 +93,15 @@ public juce::ChangeBroadcaster
 	double playbackPosition = 0.0; // サンプル位置
 	double targetScratchSpeed = 1.0;     // 目標再生速度
 	double currentScratchSpeed = 1.0;    // 現在の再生速度（スムーズ変化用）
+
+	// Sample Slots
+	struct SampleSlot {
+		juce::AudioBuffer<float> buffer;
+		juce::String fileName;
+		int numSamples = 0;
+	};
+	std::array<SampleSlot, NUM_SLOTS> sampleSlots;
+	int activeSlotIndex = 0;
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

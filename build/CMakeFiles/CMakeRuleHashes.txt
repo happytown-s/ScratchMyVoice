@@ -1,0 +1,2 @@
+# Hashes of file build rules.
+0bebd97e3ac84fe3d7b56ae4e4b7438e ScratchMyVoice_artefacts/JuceLibraryCode/ScratchMyVoice/PkgInfo

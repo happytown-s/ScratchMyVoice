@@ -10,6 +10,7 @@
 #include "WaveformComponent.h"
 #include "CrossfaderComponent.h"
 #include "SampleListComponent.h"
+#include "SampleSlotComponent.h"
 
 class MainComponent : public juce::AudioAppComponent, public juce::Button::Listener, public juce::Timer
 {
@@ -36,6 +37,7 @@ class MainComponent : public juce::AudioAppComponent, public juce::Button::Liste
 	std::unique_ptr<WaveformComponent> waveform;
 	std::unique_ptr<CrossfaderComponent> crossfader;
 	std::unique_ptr<SampleListComponent> sampleList;
+	std::unique_ptr<SampleSlotComponent> sampleSlots;
 
 	// Layout Controls
 	juce::TextButton libraryToggleButton { "Library" };

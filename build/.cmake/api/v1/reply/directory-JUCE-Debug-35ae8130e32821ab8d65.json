@@ -1,0 +1,60 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"install"
+		],
+		"files" : 
+		[
+			"/Users/mtsh/JUCE/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 160,
+				"parent" : 0
+			}
+		]
+	},
+	"installers" : 
+	[
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "lib/cmake/JUCE-8.0.10",
+			"paths" : 
+			[
+				"build/JUCE/JUCEConfigVersion.cmake",
+				"build/JUCE/JUCEConfig.cmake",
+				"/Users/mtsh/JUCE/extras/Build/CMake/JUCECheckAtomic.cmake",
+				"/Users/mtsh/JUCE/extras/Build/CMake/JUCEHelperTargets.cmake",
+				"/Users/mtsh/JUCE/extras/Build/CMake/JUCEModuleSupport.cmake",
+				"/Users/mtsh/JUCE/extras/Build/CMake/JUCEUtils.cmake",
+				"/Users/mtsh/JUCE/extras/Build/CMake/JuceLV2Defines.h.in",
+				"/Users/mtsh/JUCE/extras/Build/CMake/LaunchScreen.storyboard",
+				"/Users/mtsh/JUCE/extras/Build/CMake/PIPAudioProcessor.cpp.in",
+				"/Users/mtsh/JUCE/extras/Build/CMake/PIPAudioProcessorWithARA.cpp.in",
+				"/Users/mtsh/JUCE/extras/Build/CMake/PIPComponent.cpp.in",
+				"/Users/mtsh/JUCE/extras/Build/CMake/PIPConsole.cpp.in",
+				"/Users/mtsh/JUCE/extras/Build/CMake/RecentFilesMenuTemplate.nib",
+				"/Users/mtsh/JUCE/extras/Build/CMake/UnityPluginGUIScript.cs.in",
+				"/Users/mtsh/JUCE/extras/Build/CMake/checkBundleSigning.cmake",
+				"/Users/mtsh/JUCE/extras/Build/CMake/copyDir.cmake",
+				"/Users/mtsh/JUCE/extras/Build/CMake/juce_runtime_arch_detection.cpp",
+				"/Users/mtsh/JUCE/extras/Build/CMake/juce_LinuxSubprocessHelper.cpp"
+			],
+			"type" : "file"
+		}
+	],
+	"paths" : 
+	{
+		"build" : "JUCE",
+		"source" : "/Users/mtsh/JUCE"
+	}
+}

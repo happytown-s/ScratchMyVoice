@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug ScratchMyVoice",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/ScratchMyVoice_artefacts/ScratchMyVoice.app/Contents/MacOS/ScratchMyVoice",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "CMake: build"
+        },
+        {
+            "name": "Run ScratchMyVoice (No Debug)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/ScratchMyVoice_artefacts/ScratchMyVoice.app/Contents/MacOS/ScratchMyVoice",
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
