@@ -82,6 +82,9 @@ public juce::ChangeBroadcaster
 	// Crossfader
 	juce::LinearSmoothedValue<float> crossfaderGain { 1.0f };
 
+	// Thread safety for recording buffer (audio callback vs main thread)
+	juce::SpinLock bufferLock;
+
 	// Recording buffer
 	bool recordingState = false;
 	juce::AudioBuffer<float> recordedBuffer;

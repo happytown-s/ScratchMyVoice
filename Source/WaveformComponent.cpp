@@ -52,6 +52,8 @@ void WaveformComponent::paint(juce::Graphics& g)
 
 void WaveformComponent::resized()
 {
+	// Window resize requires full path rebuild
+	cachedBufferSize = 0;
 	updateWaveformPath();
 }
 
@@ -60,14 +62,10 @@ void WaveformComponent::timerCallback()
 	// 録音中または再生中は再描画
 	if (audioEngine.isRecording() || audioEngine.isPlaying())
 	{
-		// 録音中は波形を更新
+		// 録音中は差分更新のみ（UIスレッドブロック回避）
 		if (audioEngine.isRecording())
 		{
-			int currentSamples = audioEngine.getRecordedSamplesCount();
-			if (currentSamples != cachedBufferSize)
-			{
-				updateWaveformPath();
-			}
+			updateWaveformPath();
 		}
 		repaint();
 	}
@@ -75,7 +73,9 @@ void WaveformComponent::timerCallback()
 
 void WaveformComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
-	// 録音状態が変わったら波形を更新
+	juce::ignoreUnused(source);
+	// 録音状態が変わったらフル再構築（バッファ内容がリセットされる可能性がある）
+	cachedBufferSize = 0;
 	updateWaveformPath();
 	repaint();
 }
@@ -83,17 +83,56 @@ void WaveformComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 void WaveformComponent::setExpanded(bool shouldExpand)
 {
 	isExpanded = shouldExpand;
+	cachedBufferSize = 0;
 	resized();
 }
 
 void WaveformComponent::updateWaveformPath()
 {
+	const auto& buffer = audioEngine.getRecordedBuffer();
+	int numSamples = audioEngine.getRecordedSamplesCount();
+	
+	if (numSamples <= 0)
+	{
+		waveformPath.clear();
+		cachedBufferSize = 0;
+		cachedRecordedSamples = 0;
+		return;
+	}
+	
+	auto bounds = getLocalBounds().toFloat().reduced(2);
+	if (bounds.getWidth() <= 0 || bounds.getHeight() <= 0) return;
+	
+	int samplesPerPixel = juce::jmax(1, numSamples / static_cast<int>(bounds.getWidth()));
+	
+	// バッファサイズが変わった（setSize等）または初回はフル再構築
+	if (buffer.getNumSamples() != cachedBufferSize || cachedRecordedSamples == 0)
+	{
+		rebuildFullWaveformPath();
+		return;
+	}
+	
+	// 差分更新：新しく録音されたサンプルのみをスキャン
+	int newSamples = numSamples;
+	if (newSamples > cachedRecordedSamples)
+	{
+		appendWaveformPath(cachedRecordedSamples, newSamples);
+	}
+}
+
+void WaveformComponent::rebuildFullWaveformPath()
+{
+	const auto& buffer = audioEngine.getRecordedBuffer();
+	int numSamples = audioEngine.getRecordedSamplesCount();
+	
 	waveformPath.clear();
 	
-	const auto& buffer = audioEngine.getRecordedBuffer();
-	int numSamples = audioEngine.getRecordedSamplesCount(); // 実際に録音されたサンプル数を使用
-	
-	if (numSamples <= 0) return;
+	if (numSamples <= 0)
+	{
+		cachedBufferSize = buffer.getNumSamples();
+		cachedRecordedSamples = 0;
+		return;
+	}
 	
 	auto bounds = getLocalBounds().toFloat().reduced(2);
 	float width = bounds.getWidth();
@@ -105,6 +144,7 @@ void WaveformComponent::updateWaveformPath()
 	
 	const float* channelData = buffer.getReadPointer(0);
 	
+	// 上半分
 	waveformPath.startNewSubPath(bounds.getX(), centerY);
 	
 	for (int x = 0; x < static_cast<int>(width); ++x)
@@ -140,6 +180,61 @@ void WaveformComponent::updateWaveformPath()
 	
 	waveformPath.closeSubPath();
 	
-	cachedBufferSize = numSamples;
+	cachedBufferSize = buffer.getNumSamples();
+	cachedRecordedSamples = numSamples;
 }
 
+void WaveformComponent::appendWaveformPath(int fromSample, int toSample)
+{
+	const auto& buffer = audioEngine.getRecordedBuffer();
+	int numSamples = audioEngine.getRecordedSamplesCount();
+	
+	auto bounds = getLocalBounds().toFloat().reduced(2);
+	float width = bounds.getWidth();
+	float height = bounds.getHeight();
+	float centerY = bounds.getCentreY();
+	
+	int samplesPerPixel = juce::jmax(1, numSamples / static_cast<int>(width));
+	const float* channelData = buffer.getReadPointer(0);
+	
+	// 差分のみスキャン — 新しいピクセル範囲を計算
+	int fromPixel = fromSample / samplesPerPixel;
+	int toPixel = juce::jmin(static_cast<int>(width), (toSample + samplesPerPixel - 1) / samplesPerPixel);
+	
+	// 既存パスの最後のポイントを取得し、そこから続きを描画
+	// 上半分の新しいピクセルのみ更新
+	for (int x = fromPixel; x < toPixel; ++x)
+	{
+		int startSample = x * samplesPerPixel;
+		int endSample = juce::jmin(startSample + samplesPerPixel, toSample);
+		
+		float maxValue = 0.0f;
+		for (int i = startSample; i < endSample; ++i)
+		{
+			maxValue = juce::jmax(maxValue, std::abs(channelData[i]));
+		}
+		
+		float yTop = centerY - maxValue * (height / 2.0f) * 0.9f;
+		float yBot = centerY + maxValue * (height / 2.0f) * 0.9f;
+		
+		waveformPath.lineTo(bounds.getX() + static_cast<float>(x), yTop);
+	}
+	
+	// 下半分（ミラー）の差分 — reverse order
+	for (int x = toPixel - 1; x >= fromPixel; --x)
+	{
+		int startSample = x * samplesPerPixel;
+		int endSample = juce::jmin(startSample + samplesPerPixel, toSample);
+		
+		float maxValue = 0.0f;
+		for (int i = startSample; i < endSample; ++i)
+		{
+			maxValue = juce::jmax(maxValue, std::abs(channelData[i]));
+		}
+		
+		float yBot = centerY + maxValue * (height / 2.0f) * 0.9f;
+		waveformPath.lineTo(bounds.getX() + static_cast<float>(x), yBot);
+	}
+	
+	cachedRecordedSamples = toSample;
+}

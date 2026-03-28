@@ -51,6 +51,9 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
         int numSamplesToFill = bufferToFill.numSamples;
         int numChannels = juce::jmin(outputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
         
+        // Lock to prevent concurrent modification from loadFileToBuffer/loadFileToSlot
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        
         for (int sample = 0; sample < numSamplesToFill; ++sample)
         {
             // 線形補間のためのインデックスと係数を計算
@@ -100,6 +103,9 @@ void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToF
     int numSamples = bufferToFill.numSamples;
     int numChannels = juce::jmin(inputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
     
+    // Lock to prevent concurrent startRecording/stopRecording/loadFileToBuffer
+    juce::SpinLock::ScopedLockType lock(bufferLock);
+    
     // バッファに余裕があれば書き込み
     if (recordWritePosition + numSamples <= recordedBuffer.getNumSamples())
     {
@@ -113,18 +119,22 @@ void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToF
     else
     {
         // バッファがいっぱいになったら録音停止
-        stopRecording();
+        recordingState = false;
+        playbackPosition = 0.0;
+        sendChangeMessage();
     }
 }
 
 void AudioEngine::loadFile(const juce::File& file)
 {
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
-        std::unique_ptr<juce::AudioFormatReaderSource> newSource(new juce::AudioFormatReaderSource(reader, true));
+        std::unique_ptr<juce::AudioFormatReaderSource> newSource(
+            new juce::AudioFormatReaderSource(reader.get(), false)); // don't take ownership yet
         transportSource.setSource(newSource.get(), 0, nullptr, reader->sampleRate);
         readerSource.reset(newSource.release());
+        readerSource->setReader(reader.release(), true); // now transfer ownership
         
         resamplerSource.reset(new juce::ResamplingAudioSource(&transportSource, false, 2));
         
@@ -158,17 +168,23 @@ void AudioEngine::setCrossfaderGain(float gain)
 
 void AudioEngine::startRecording()
 {
-    recordWritePosition = 0;
-    recordedBuffer.clear();
-    recordingState = true;
-    playing = false; // 録音中は再生停止
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        recordWritePosition = 0;
+        recordedBuffer.clear();
+        recordingState = true;
+        playing = false; // 録音中は再生停止
+    }
     sendChangeMessage();
 }
 
 void AudioEngine::stopRecording()
 {
-    recordingState = false;
-    playbackPosition = 0.0;
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        recordingState = false;
+        playbackPosition = 0.0;
+    }
     sendChangeMessage();
 }
 
@@ -248,22 +264,24 @@ juce::File AudioEngine::saveRecordingToFile()
 
 void AudioEngine::loadFileToBuffer(const juce::File& file)
 {
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
-        // 録音バッファにファイルの内容をロード
-        int numSamples = static_cast<int>(reader->lengthInSamples);
-        int numChannels = static_cast<int>(reader->numChannels);
-        
-        recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
-        reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
-        
-        recordWritePosition = numSamples;
-        currentSampleRate = reader->sampleRate;
-        playbackPosition = 0.0;
-        
-        delete reader;
-        
+        {
+            juce::SpinLock::ScopedLockType lock(bufferLock);
+            
+            // 録音バッファにファイルの内容をロード
+            int numSamples = static_cast<int>(reader->lengthInSamples);
+            int numChannels = static_cast<int>(reader->numChannels);
+            
+            recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
+            reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
+            
+            recordWritePosition = numSamples;
+            currentSampleRate = reader->sampleRate;
+            playbackPosition = 0.0;
+        }
+        // reader is automatically deleted by unique_ptr
         sendChangeMessage();
     }
 }
@@ -274,7 +292,7 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
 {
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
     
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
         int numSamples = static_cast<int>(reader->lengthInSamples);
@@ -286,7 +304,7 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
         slot.numSamples = numSamples;
         slot.fileName = file.getFileNameWithoutExtension();
         
-        delete reader;
+        // reader is automatically deleted by unique_ptr
         
         // アクティブスロットならメインバッファにもコピー
         if (slotIndex == activeSlotIndex)
@@ -307,11 +325,14 @@ void AudioEngine::setActiveSlot(int slotIndex)
     const auto& slot = sampleSlots[static_cast<size_t>(slotIndex)];
     if (slot.numSamples > 0)
     {
-        // スロットのバッファをメイン再生バッファにコピー
-        recordedBuffer.makeCopyOf(slot.buffer);
-        recordWritePosition = slot.numSamples;
-        playbackPosition = 0.0;
-        
+        {
+            juce::SpinLock::ScopedLockType lock(bufferLock);
+            
+            // スロットのバッファをメイン再生バッファにコピー
+            recordedBuffer.makeCopyOf(slot.buffer);
+            recordWritePosition = slot.numSamples;
+            playbackPosition = 0.0;
+        }
         sendChangeMessage();
     }
 }
