@@ -33,7 +33,6 @@ public juce::ChangeBroadcaster
 	void recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill);
 	bool isRecording() const { return recordingState; }
 	bool hasRecordedAudio() const { return recordedBuffer.getNumSamples() > 0; }
-
 	// Scratch playback - 録音したバッファをスクラッチ再生
 	void setPlaybackPosition(double normalizedPosition); // 0.0〜1.0
 	double getPlaybackPosition() const;
@@ -41,20 +40,24 @@ public juce::ChangeBroadcaster
 
 	// Getters for Visualizers
 	juce::AudioTransportSource& getTransportSource() { return transportSource; }
-	juce::AudioThumbnail& getThumbnail() { return thumbnail; }
 	double getCurrentPosition() { return transportSource.getCurrentPosition(); }
 	double getLengthInSeconds() { return transportSource.getLengthInSeconds(); }
 	bool isPlaying() const { return playing; }
-	
+
 	// 録音バッファへのアクセス（波形表示用）
 	const juce::AudioBuffer<float>& getRecordedBuffer() const { return recordedBuffer; }
 	double getRecordedSampleRate() const { return currentSampleRate; }
 	int getRecordedSamplesCount() const { return recordWritePosition; } // 実際に録音されたサンプル数
-	
+
+	// ── 波形描画用 AudioThumbnail（UIスレッドセーフ） ──────────────────
+	// 録音中にバックグラウンドでmin/maxピークを非同期計算。
+	// UIスレッドからは getMinAndMaxChannel() で O(1) アクセス可能。
+	juce::AudioThumbnail& getRecordedThumbnail() { return recordedThumbnail; }
+
 	// ライブラリフォルダへの保存
 	juce::File getLibraryFolder() const;
 	juce::File saveRecordingToFile(); // 録音データをWAVとして保存し、ファイルを返す
-	
+
 	// ファイルから録音バッファにロード（スクラッチ再生用）
 	void loadFileToBuffer(const juce::File& file);
 
@@ -75,19 +78,26 @@ public juce::ChangeBroadcaster
 	juce::AudioTransportSource transportSource;
 	std::unique_ptr<juce::ResamplingAudioSource> resamplerSource;
 
-	// Thumbnail Cache
+	// Thumbnail Cache（ファイル再生用）
 	juce::AudioThumbnailCache thumbnailCache{ 5 };
-	juce::AudioThumbnail thumbnail;
+	juce::AudioThumbnail fileThumbnail;
+
+	// ── Recorded buffer thumbnail（録音/スクラッチ用） ─────────────────
+	juce::AudioThumbnailCache recordedThumbCache{ 2 };
+	juce::AudioThumbnail recordedThumbnail;
 
 	// Crossfader
 	juce::LinearSmoothedValue<float> crossfaderGain { 1.0f };
+
+	// Thread safety for recording buffer access (audio thread vs message thread)
+	juce::SpinLock recordLock;
 
 	// Recording buffer
 	bool recordingState = false;
 	juce::AudioBuffer<float> recordedBuffer;
 	int recordWritePosition = 0;
 	double currentSampleRate = 44100.0;
-	
+
 	// Playback state
 	bool playing = false;
 	double playbackPosition = 0.0; // サンプル位置
@@ -102,6 +112,9 @@ public juce::ChangeBroadcaster
 	};
 	std::array<SampleSlot, NUM_SLOTS> sampleSlots;
 	int activeSlotIndex = 0;
+
+	// AudioThumbnail用内部ヘルパー
+	void resetRecordedThumbnail();
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };
