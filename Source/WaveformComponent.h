@@ -24,14 +24,19 @@ class WaveformComponent : public juce::Component,
 	void updateWaveformPath();
 
 	private:
-	void updateWaveformPathIncremental();
-	void drawWaveformFromThumbnail(juce::Graphics& g);
+	void invalidateCache();
+	void rebuildPathFromPeaks();
+	void updatePeakCacheIncremental();
 
 	AudioEngine& audioEngine;
 	bool isExpanded = false;
 	juce::Path waveformPath;
 	int cachedBufferSize = 0;
-	bool cachedForFinishedRecording = false;
+
+	// Peak cache: one max-value per display pixel column (upper half only; mirrored in rebuildPathFromPeaks)
+	std::vector<float> peakCache;
+	int peakCacheNumSamples = 0;   // How many recorded samples the peakCache currently covers
+	bool pathIsFinal = false;      // true after recording stops — no further rebuilds unless resized/invalidated
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
 };
