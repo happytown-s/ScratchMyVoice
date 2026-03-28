@@ -2,6 +2,18 @@
  ==============================================================================
  AudioEngine.cpp
  ==============================================================================
+ Thread safety strategy:
+   1. Atomic flags (recordingState, playing, recordWritePosition, etc.)
+      for fast lock-free checks in the audio thread.
+   2. Buffer swap pattern: main thread modifies a staging buffer under
+      CriticalSection, then atomically publishes the pointer. The audio
+      thread loads the pointer once per callback and reads from it — zero
+      contention, zero blocking.
+   3. recordAudioBlock writes directly into activeBuffer (the audio thread
+      "owns" the recording write position). startRecording() stops playback
+      first, clears the buffer, then sets recordingState.
+   4. playbackPosition is std::atomic<double> — written only by the audio
+      thread (single-writer) and read by the main thread for UI display.
  */
 #include "AudioEngine.h"
 
@@ -9,28 +21,58 @@ AudioEngine::AudioEngine()
 : thumbnail(512, formatManager, thumbnailCache)
 {
 	formatManager.registerBasicFormats();
-	
-	// 録音バッファを初期化（最大30秒分）
-	recordedBuffer.setSize(2, 44100 * 30);
-	recordedBuffer.clear();
+	allocateBuffers(44100 * 30, 44100.0);
 }
 
 AudioEngine::~AudioEngine()
 {
     transportSource.setSource(nullptr);
+    recordingState.store(false, std::memory_order_release);
+    playing.store(false, std::memory_order_release);
 }
+
+// ---------------------------------------------------------------------------
+// Buffer management
+// ---------------------------------------------------------------------------
+
+void AudioEngine::allocateBuffers(int maxSamples, double sampleRate)
+{
+    // Called from main thread before audio starts — no lock needed
+    auto makeBuf = [maxSamples]() {
+        auto sb = std::make_unique<SharedBuffer>();
+        sb->buffer.setSize(2, maxSamples, true, true, true);
+        sb->buffer.clear();
+        sb->writePosition = 0;
+        return sb;
+    };
+    activeBuffer = makeBuf();
+    stagingBuffer = makeBuf();
+    audioBufferPtr.store(activeBuffer.get(), std::memory_order_release);
+}
+
+void AudioEngine::commitStagingBuffer()
+{
+    // Main thread only. Swaps staging <-> active under CS.
+    juce::ScopedLock lock(bufferSwapLock);
+    std::swap(activeBuffer, stagingBuffer);
+    audioBufferPtr.store(activeBuffer.get(), std::memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
+// AudioSource overrides
+// ---------------------------------------------------------------------------
 
 void AudioEngine::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
-    currentSampleRate = sampleRate;
+    currentSampleRate.store(sampleRate, std::memory_order_relaxed);
     transportSource.prepareToPlay(samplesPerBlockExpected, sampleRate);
-    
-    // 録音バッファのサイズを現在のサンプルレートに合わせる（30秒分）
+
+    // Reallocate buffers for the actual sample rate (30 seconds)
     int maxSamples = static_cast<int>(sampleRate * 30.0);
-    recordedBuffer.setSize(2, maxSamples, true, true, true);
-    
-    crossfaderGain.reset(sampleRate, 0.01); // 10msスムージング
-    
+    allocateBuffers(maxSamples, sampleRate);
+
+    crossfaderGain.reset(sampleRate, 0.01); // 10ms smoothing
+
     if (resamplerSource)
         resamplerSource->prepareToPlay(samplesPerBlockExpected, sampleRate);
 }
@@ -44,91 +86,114 @@ void AudioEngine::releaseResources()
 
 void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    // 再生中は録音バッファからスクラッチ再生
-    if (playing && recordedBuffer.getNumSamples() > 0 && recordWritePosition > 0)
+    // Fast atomic check — no lock, no blocking
+    if (playing.load(std::memory_order_acquire))
     {
-        auto* outputBuffer = bufferToFill.buffer;
-        int numSamplesToFill = bufferToFill.numSamples;
-        int numChannels = juce::jmin(outputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
-        
-        for (int sample = 0; sample < numSamplesToFill; ++sample)
+        // Snapshot the shared pointer once — this is the only atomic read
+        SharedBuffer* buf = audioBufferPtr.load(std::memory_order_acquire);
+        int wp = buf ? buf->writePosition : 0;
+
+        if (buf && wp > 0 && buf->buffer.getNumSamples() > 0)
         {
-            // 線形補間のためのインデックスと係数を計算
-            int pos0 = static_cast<int>(playbackPosition);
-            int pos1 = pos0 + 1;
-            float frac = static_cast<float>(playbackPosition - pos0);
-            
-            // バッファ範囲内にクランプ
-            pos0 = juce::jlimit(0, recordWritePosition - 1, pos0);
-            pos1 = juce::jlimit(0, recordWritePosition - 1, pos1);
-            
-            float gain = crossfaderGain.getNextValue();
-            
-            for (int ch = 0; ch < numChannels; ++ch)
+            auto* outputBuffer = bufferToFill.buffer;
+            int numSamplesToFill = bufferToFill.numSamples;
+            int numChannels = juce::jmin(outputBuffer->getNumChannels(),
+                                        buf->buffer.getNumChannels());
+
+            double localPlaybackPos = playbackPosition.load(std::memory_order_relaxed);
+            double localSpeed = targetScratchSpeed.load(std::memory_order_relaxed);
+
+            for (int sample = 0; sample < numSamplesToFill; ++sample)
             {
-                // 線形補間でサンプル値を計算（ノイズ軽減）
-                float sample0 = recordedBuffer.getSample(ch, pos0);
-                float sample1 = recordedBuffer.getSample(ch, pos1);
-                float interpolatedSample = sample0 + frac * (sample1 - sample0);
-                
-                outputBuffer->addSample(ch, bufferToFill.startSample + sample, interpolatedSample * gain);
+                int pos0 = static_cast<int>(localPlaybackPos);
+                int pos1 = pos0 + 1;
+                float frac = static_cast<float>(localPlaybackPos - pos0);
+
+                pos0 = juce::jlimit(0, wp - 1, pos0);
+                pos1 = juce::jlimit(0, wp - 1, pos1);
+
+                float gain = crossfaderGain.getNextValue();
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    float s0 = buf->buffer.getSample(ch, pos0);
+                    float s1 = buf->buffer.getSample(ch, pos1);
+                    float interpolated = s0 + frac * (s1 - s0);
+                    outputBuffer->addSample(ch, bufferToFill.startSample + sample,
+                                            interpolated * gain);
+                }
+
+                localPlaybackPos += localSpeed;
+
+                if (localPlaybackPos >= wp)
+                    localPlaybackPos = 0.0;
+                else if (localPlaybackPos < 0.0)
+                    localPlaybackPos = static_cast<double>(wp - 1);
             }
-            
-            // 再生位置を進める（スムーズなスピード変化）
-            playbackPosition += targetScratchSpeed;
-            
-            // ループ再生（録音範囲内でループ）
-            if (playbackPosition >= recordWritePosition)
-                playbackPosition = 0.0;
-            else if (playbackPosition < 0.0)
-                playbackPosition = recordWritePosition - 1;
+
+            // Write back (single-writer atomic)
+            playbackPosition.store(localPlaybackPos, std::memory_order_relaxed);
+            return;
         }
     }
-    else
-    {
-        // 再生していない場合、クロスフェーダーのスムーズ値を更新
-        for (int i = 0; i < bufferToFill.numSamples; ++i)
-            crossfaderGain.getNextValue();
-    }
+
+    // Not playing or no data — advance the crossfader smoother
+    for (int i = 0; i < bufferToFill.numSamples; ++i)
+        crossfaderGain.getNextValue();
 }
 
 void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    if (!recordingState) return;
-    
+    // Fast atomic check — no lock
+    if (!recordingState.load(std::memory_order_acquire))
+        return;
+
+    SharedBuffer* buf = audioBufferPtr.load(std::memory_order_acquire);
+    if (!buf) return;
+
     auto* inputBuffer = bufferToFill.buffer;
     int numSamples = bufferToFill.numSamples;
-    int numChannels = juce::jmin(inputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
-    
-    // バッファに余裕があれば書き込み
-    if (recordWritePosition + numSamples <= recordedBuffer.getNumSamples())
+    int numChannels = juce::jmin(inputBuffer->getNumChannels(),
+                                buf->buffer.getNumChannels());
+
+    int wp = buf->writePosition;
+
+    if (wp + numSamples <= buf->buffer.getNumSamples())
     {
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            recordedBuffer.copyFrom(ch, recordWritePosition,
-                                    *inputBuffer, ch, bufferToFill.startSample, numSamples);
+            buf->buffer.copyFrom(ch, wp,
+                                 *inputBuffer, ch, bufferToFill.startSample, numSamples);
         }
-        recordWritePosition += numSamples;
+        buf->writePosition = wp + numSamples;
+        recordWritePosition.store(wp + numSamples, std::memory_order_release);
     }
     else
     {
-        // バッファがいっぱいになったら録音停止
-        stopRecording();
+        // Buffer full — stop recording atomically
+        recordingState.store(false, std::memory_order_release);
+        playbackPosition.store(0.0, std::memory_order_release);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Control methods
+// ---------------------------------------------------------------------------
 
 void AudioEngine::loadFile(const juce::File& file)
 {
     auto* reader = formatManager.createReaderFor(file);
     if (reader != nullptr)
     {
-        std::unique_ptr<juce::AudioFormatReaderSource> newSource(new juce::AudioFormatReaderSource(reader, true));
+        std::unique_ptr<juce::AudioFormatReaderSource> newSource(
+            new juce::AudioFormatReaderSource(reader, true));
         transportSource.setSource(newSource.get(), 0, nullptr, reader->sampleRate);
         readerSource.reset(newSource.release());
-        
-        resamplerSource.reset(new juce::ResamplingAudioSource(&transportSource, false, 2));
-        
-        sendChangeMessage(); 
+
+        resamplerSource.reset(
+            new juce::ResamplingAudioSource(&transportSource, false, 2));
+
+        sendChangeMessage();
     }
 }
 
@@ -136,19 +201,20 @@ void AudioEngine::play()
 {
     if (hasRecordedAudio())
     {
-        playing = true;
-        targetScratchSpeed = 1.0;
+        playbackPosition.store(0.0, std::memory_order_release);
+        targetScratchSpeed.store(1.0, std::memory_order_release);
+        playing.store(true, std::memory_order_release);
     }
 }
 
 void AudioEngine::stop()
 {
-    playing = false;
+    playing.store(false, std::memory_order_release);
 }
 
 void AudioEngine::setScratchRate(double rate)
 {
-    targetScratchSpeed = rate;
+    targetScratchSpeed.store(rate, std::memory_order_release);
 }
 
 void AudioEngine::setCrossfaderGain(float gain)
@@ -156,93 +222,149 @@ void AudioEngine::setCrossfaderGain(float gain)
     crossfaderGain.setTargetValue(gain);
 }
 
+// ---------------------------------------------------------------------------
+// Recording
+// ---------------------------------------------------------------------------
+
 void AudioEngine::startRecording()
 {
-    recordWritePosition = 0;
-    recordedBuffer.clear();
-    recordingState = true;
-    playing = false; // 録音中は再生停止
+    // Stop playback first (release ordering ensures audio thread sees it)
+    playing.store(false, std::memory_order_release);
+
+    // Clear the recording buffer
+    {
+        juce::ScopedLock lock(bufferSwapLock);
+        // Safe because playback is stopped and recordingState is still false
+        activeBuffer->buffer.clear();
+        activeBuffer->writePosition = 0;
+        recordWritePosition.store(0, std::memory_order_release);
+        playbackPosition.store(0.0, std::memory_order_release);
+    }
+
+    // Now enable recording — audio thread picks it up on next callback
+    recordingState.store(true, std::memory_order_release);
     sendChangeMessage();
 }
 
 void AudioEngine::stopRecording()
 {
-    recordingState = false;
-    playbackPosition = 0.0;
+    recordingState.store(false, std::memory_order_release);
+    playbackPosition.store(0.0, std::memory_order_release);
     sendChangeMessage();
 }
 
+// ---------------------------------------------------------------------------
+// Playback position
+// ---------------------------------------------------------------------------
+
 void AudioEngine::setPlaybackPosition(double normalizedPosition)
 {
-    if (recordWritePosition > 0)
+    int wp = recordWritePosition.load(std::memory_order_acquire);
+    if (wp > 0)
     {
-        playbackPosition = normalizedPosition * recordWritePosition;
-        playbackPosition = juce::jlimit(0.0, static_cast<double>(recordWritePosition - 1), playbackPosition);
+        double pos = normalizedPosition * static_cast<double>(wp);
+        pos = juce::jlimit(0.0, static_cast<double>(wp - 1), pos);
+        playbackPosition.store(pos, std::memory_order_release);
     }
 }
 
 double AudioEngine::getPlaybackPosition() const
 {
-    if (recordWritePosition > 0)
-        return playbackPosition / recordWritePosition;
+    int wp = recordWritePosition.load(std::memory_order_acquire);
+    if (wp > 0)
+        return playbackPosition.load(std::memory_order_relaxed) / static_cast<double>(wp);
     return 0.0;
 }
 
 void AudioEngine::setScratchSpeed(double speed)
 {
-    targetScratchSpeed = speed;
+    targetScratchSpeed.store(speed, std::memory_order_release);
 }
+
+// ---------------------------------------------------------------------------
+// Change listener
+// ---------------------------------------------------------------------------
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
-    // 必要に応じて実装
     juce::ignoreUnused(source);
 }
 
+// ---------------------------------------------------------------------------
+// Buffer access (UI thread)
+// ---------------------------------------------------------------------------
+
+juce::AudioBuffer<float> AudioEngine::getRecordedBufferCopy() const
+{
+    // Snapshot current buffer pointer without blocking audio thread
+    SharedBuffer* buf = audioBufferPtr.load(std::memory_order_acquire);
+    juce::AudioBuffer<float> copy;
+
+    if (buf)
+    {
+        int wp = buf->writePosition;
+        if (wp > 0)
+        {
+            copy = juce::AudioBuffer<float>(buf->buffer.getNumChannels(), wp);
+            for (int ch = 0; ch < copy.getNumChannels(); ++ch)
+                copy.copyFrom(ch, 0, buf->buffer, ch, 0, wp);
+        }
+    }
+    return copy;
+}
+
+// ---------------------------------------------------------------------------
+// File I/O
+// ---------------------------------------------------------------------------
+
 juce::File AudioEngine::getLibraryFolder() const
 {
-    // アプリケーションデータフォルダ内にライブラリフォルダを作成
     auto folder = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("ScratchMyVoice")
         .getChildFile("Library");
-    
+
     if (!folder.exists())
         folder.createDirectory();
-    
+
     return folder;
 }
 
 juce::File AudioEngine::saveRecordingToFile()
 {
-    if (recordWritePosition <= 0)
+    int wp = recordWritePosition.load(std::memory_order_acquire);
+    if (wp <= 0)
         return juce::File();
-    
+
+    // Take a snapshot — no lock held during I/O
+    juce::AudioBuffer<float> snapshot = getRecordedBufferCopy();
+    double sampleRate = currentSampleRate.load(std::memory_order_relaxed);
+
+    if (snapshot.getNumSamples() <= 0)
+        return juce::File();
+
     auto libraryFolder = getLibraryFolder();
-    
-    // タイムスタンプでファイル名を生成
     auto now = juce::Time::getCurrentTime();
     auto fileName = now.formatted("Recording_%Y%m%d_%H%M%S.wav");
     auto outputFile = libraryFolder.getChildFile(fileName);
-    
-    // WAVファイルとして保存
+
     juce::WavAudioFormat wavFormat;
     std::unique_ptr<juce::AudioFormatWriter> writer(
         wavFormat.createWriterFor(
             new juce::FileOutputStream(outputFile),
-            currentSampleRate,
-            static_cast<unsigned int>(recordedBuffer.getNumChannels()),
-            16, // bits per sample
+            sampleRate,
+            static_cast<unsigned int>(snapshot.getNumChannels()),
+            16,
             {},
             0
         )
     );
-    
+
     if (writer != nullptr)
     {
-        writer->writeFromAudioSampleBuffer(recordedBuffer, 0, recordWritePosition);
+        writer->writeFromAudioSampleBuffer(snapshot, 0, snapshot.getNumSamples());
         return outputFile;
     }
-    
+
     return juce::File();
 }
 
@@ -251,49 +373,59 @@ void AudioEngine::loadFileToBuffer(const juce::File& file)
     auto* reader = formatManager.createReaderFor(file);
     if (reader != nullptr)
     {
-        // 録音バッファにファイルの内容をロード
         int numSamples = static_cast<int>(reader->lengthInSamples);
         int numChannels = static_cast<int>(reader->numChannels);
-        
-        recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
-        reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
-        
-        recordWritePosition = numSamples;
-        currentSampleRate = reader->sampleRate;
-        playbackPosition = 0.0;
-        
+
+        // Stop audio operations while loading
+        playing.store(false, std::memory_order_release);
+        recordingState.store(false, std::memory_order_release);
+
+        {
+            juce::ScopedLock lock(bufferSwapLock);
+            stagingBuffer->buffer.setSize(juce::jmax(2, numChannels), numSamples,
+                                          true, true, true);
+            reader->read(&stagingBuffer->buffer, 0, numSamples, 0, true, true);
+            stagingBuffer->writePosition = numSamples;
+        }
+
+        currentSampleRate.store(reader->sampleRate, std::memory_order_release);
         delete reader;
-        
+
+        // Atomically publish the new buffer
+        commitStagingBuffer();
+        recordWritePosition.store(numSamples, std::memory_order_release);
+        playbackPosition.store(0.0, std::memory_order_release);
+
         sendChangeMessage();
     }
 }
 
-// --- Sample Slots Implementation ---
+// ---------------------------------------------------------------------------
+// Sample Slots
+// ---------------------------------------------------------------------------
 
 void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
 {
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
-    
+
     auto* reader = formatManager.createReaderFor(file);
     if (reader != nullptr)
     {
         int numSamples = static_cast<int>(reader->lengthInSamples);
         int numChannels = static_cast<int>(reader->numChannels);
-        
+
         auto& slot = sampleSlots[static_cast<size_t>(slotIndex)];
-        slot.buffer.setSize(juce::jmax(2, numChannels), numSamples);
+        slot.buffer.setSize(juce::jmax(2, numChannels), numSamples,
+                            true, true, true);
         reader->read(&slot.buffer, 0, numSamples, 0, true, true);
         slot.numSamples = numSamples;
         slot.fileName = file.getFileNameWithoutExtension();
-        
+
         delete reader;
-        
-        // アクティブスロットならメインバッファにもコピー
+
         if (slotIndex == activeSlotIndex)
-        {
             setActiveSlot(slotIndex);
-        }
-        
+
         sendChangeMessage();
     }
 }
@@ -301,17 +433,25 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
 void AudioEngine::setActiveSlot(int slotIndex)
 {
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
-    
+
     activeSlotIndex = slotIndex;
-    
+
     const auto& slot = sampleSlots[static_cast<size_t>(slotIndex)];
     if (slot.numSamples > 0)
     {
-        // スロットのバッファをメイン再生バッファにコピー
-        recordedBuffer.makeCopyOf(slot.buffer);
-        recordWritePosition = slot.numSamples;
-        playbackPosition = 0.0;
-        
+        playing.store(false, std::memory_order_release);
+        recordingState.store(false, std::memory_order_release);
+
+        {
+            juce::ScopedLock lock(bufferSwapLock);
+            stagingBuffer->buffer.makeCopyOf(slot.buffer);
+            stagingBuffer->writePosition = slot.numSamples;
+        }
+
+        commitStagingBuffer();
+        recordWritePosition.store(slot.numSamples, std::memory_order_release);
+        playbackPosition.store(0.0, std::memory_order_release);
+
         sendChangeMessage();
     }
 }
@@ -327,4 +467,3 @@ bool AudioEngine::isSlotLoaded(int slotIndex) const
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return false;
     return sampleSlots[static_cast<size_t>(slotIndex)].numSamples > 0;
 }
-

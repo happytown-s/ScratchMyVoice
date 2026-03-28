@@ -29,7 +29,6 @@ void WaveformComponent::paint(juce::Graphics& g)
 	
 	if (!audioEngine.hasRecordedAudio())
 	{
-		// 録音がない場合のメッセージ
 		g.setColour(juce::Colours::grey);
 		g.drawText("No recording - Press REC to start", bounds, juce::Justification::centred);
 		return;
@@ -57,10 +56,8 @@ void WaveformComponent::resized()
 
 void WaveformComponent::timerCallback()
 {
-	// 録音中または再生中は再描画
 	if (audioEngine.isRecording() || audioEngine.isPlaying())
 	{
-		// 録音中は波形を更新
 		if (audioEngine.isRecording())
 		{
 			int currentSamples = audioEngine.getRecordedSamplesCount();
@@ -75,7 +72,6 @@ void WaveformComponent::timerCallback()
 
 void WaveformComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
-	// 録音状態が変わったら波形を更新
 	updateWaveformPath();
 	repaint();
 }
@@ -90,8 +86,9 @@ void WaveformComponent::updateWaveformPath()
 {
 	waveformPath.clear();
 	
-	const auto& buffer = audioEngine.getRecordedBuffer();
-	int numSamples = audioEngine.getRecordedSamplesCount(); // 実際に録音されたサンプル数を使用
+	// Use thread-safe buffer copy (lock-free snapshot)
+	auto buffer = audioEngine.getRecordedBufferCopy();
+	int numSamples = audioEngine.getRecordedSamplesCount();
 	
 	if (numSamples <= 0) return;
 	
@@ -100,23 +97,23 @@ void WaveformComponent::updateWaveformPath()
 	float height = bounds.getHeight();
 	float centerY = bounds.getCentreY();
 	
-	// サンプリングレートを調整（効率のため）
 	int samplesPerPixel = juce::jmax(1, numSamples / static_cast<int>(width));
+	int availableSamples = juce::jmin(numSamples, buffer.getNumSamples());
+	if (availableSamples <= 0) return;
 	
 	const float* channelData = buffer.getReadPointer(0);
+	if (!channelData) return;
 	
 	waveformPath.startNewSubPath(bounds.getX(), centerY);
 	
 	for (int x = 0; x < static_cast<int>(width); ++x)
 	{
 		int startSample = x * samplesPerPixel;
-		int endSample = juce::jmin(startSample + samplesPerPixel, numSamples);
+		int endSample = juce::jmin(startSample + samplesPerPixel, availableSamples);
 		
 		float maxValue = 0.0f;
 		for (int i = startSample; i < endSample; ++i)
-		{
 			maxValue = juce::jmax(maxValue, std::abs(channelData[i]));
-		}
 		
 		float y = centerY - maxValue * (height / 2.0f) * 0.9f;
 		waveformPath.lineTo(bounds.getX() + static_cast<float>(x), y);
@@ -126,20 +123,16 @@ void WaveformComponent::updateWaveformPath()
 	for (int x = static_cast<int>(width) - 1; x >= 0; --x)
 	{
 		int startSample = x * samplesPerPixel;
-		int endSample = juce::jmin(startSample + samplesPerPixel, numSamples);
+		int endSample = juce::jmin(startSample + samplesPerPixel, availableSamples);
 		
 		float maxValue = 0.0f;
 		for (int i = startSample; i < endSample; ++i)
-		{
 			maxValue = juce::jmax(maxValue, std::abs(channelData[i]));
-		}
 		
 		float y = centerY + maxValue * (height / 2.0f) * 0.9f;
 		waveformPath.lineTo(bounds.getX() + static_cast<float>(x), y);
 	}
 	
 	waveformPath.closeSubPath();
-	
 	cachedBufferSize = numSamples;
 }
-

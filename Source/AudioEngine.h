@@ -2,9 +2,20 @@
  ==============================================================================
  AudioEngine.h
  ==============================================================================
+ Thread safety design:
+   - Audio thread (getNextAudioBlock, recordAudioBlock): NEVER blocks.
+     Uses std::atomic flags and reads from a stable buffer pointer.
+   - Main thread (startRecording, stopRecording, loadFileToBuffer, etc.):
+     Writes to a staging buffer under a juce::CriticalSection, then
+     atomically swaps the pointer (std::atomic_exchange) for the audio thread.
+   - Playback state (playbackPosition) is only written by the audio thread
+     and read by the main thread via getPlaybackPosition() — safe by
+     single-writer discipline with relaxed atomics.
  */
 #pragma once
 #include <JuceHeader.h>
+#include <atomic>
+#include <memory>
 #include "Constants.h"
 
 class AudioEngine : public juce::AudioSource,
@@ -31,8 +42,8 @@ public juce::ChangeBroadcaster
 	void startRecording();
 	void stopRecording();
 	void recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill);
-	bool isRecording() const { return recordingState; }
-	bool hasRecordedAudio() const { return recordedBuffer.getNumSamples() > 0; }
+	bool isRecording() const { return recordingState.load(std::memory_order_acquire); }
+	bool hasRecordedAudio() const { return recordWritePosition.load(std::memory_order_acquire) > 0; }
 
 	// Scratch playback - 録音したバッファをスクラッチ再生
 	void setPlaybackPosition(double normalizedPosition); // 0.0〜1.0
@@ -44,17 +55,17 @@ public juce::ChangeBroadcaster
 	juce::AudioThumbnail& getThumbnail() { return thumbnail; }
 	double getCurrentPosition() { return transportSource.getCurrentPosition(); }
 	double getLengthInSeconds() { return transportSource.getLengthInSeconds(); }
-	bool isPlaying() const { return playing; }
+	bool isPlaying() const { return playing.load(std::memory_order_acquire); }
 	
-	// 録音バッファへのアクセス（波形表示用）
-	const juce::AudioBuffer<float>& getRecordedBuffer() const { return recordedBuffer; }
-	double getRecordedSampleRate() const { return currentSampleRate; }
-	int getRecordedSamplesCount() const { return recordWritePosition; } // 実際に録音されたサンプル数
-	
+	// 録音バッファへのアクセス（波形表示用）— スナップショットコピーを返す
+	juce::AudioBuffer<float> getRecordedBufferCopy() const;
+	double getRecordedSampleRate() const { return currentSampleRate.load(std::memory_order_relaxed); }
+	int getRecordedSamplesCount() const { return recordWritePosition.load(std::memory_order_acquire); }
+
 	// ライブラリフォルダへの保存
 	juce::File getLibraryFolder() const;
-	juce::File saveRecordingToFile(); // 録音データをWAVとして保存し、ファイルを返す
-	
+	juce::File saveRecordingToFile();
+
 	// ファイルから録音バッファにロード（スクラッチ再生用）
 	void loadFileToBuffer(const juce::File& file);
 
@@ -70,6 +81,26 @@ public juce::ChangeBroadcaster
 	void changeListenerCallback(juce::ChangeBroadcaster* source) override;
 
 	private:
+	// --- Buffer management (lock-free for audio thread) ---
+
+	// Shared buffer — audio thread reads, main thread swaps atomically.
+	struct SharedBuffer {
+		juce::AudioBuffer<float> buffer;
+		int writePosition = 0;  // valid recorded samples count
+	};
+	std::unique_ptr<SharedBuffer> activeBuffer;  // current buffer (audio reads)
+	std::unique_ptr<SharedBuffer> stagingBuffer;  // next buffer (main writes)
+	std::atomic<SharedBuffer*> audioBufferPtr{ nullptr };
+
+	// Swap staging -> active under CS; audio thread picks up via atomic load.
+	void commitStagingBuffer();
+
+	// Allocate both buffers to hold maxSamples (2-channel).
+	void allocateBuffers(int maxSamples, double sampleRate);
+
+	juce::CriticalSection bufferSwapLock;  // protects staging writes + pointer swap
+
+	// --- Format / transport ---
 	juce::AudioFormatManager formatManager;
 	std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
 	juce::AudioTransportSource transportSource;
@@ -82,17 +113,17 @@ public juce::ChangeBroadcaster
 	// Crossfader
 	juce::LinearSmoothedValue<float> crossfaderGain { 1.0f };
 
-	// Recording buffer
-	bool recordingState = false;
-	juce::AudioBuffer<float> recordedBuffer;
-	int recordWritePosition = 0;
-	double currentSampleRate = 44100.0;
+	// --- Atomic state flags (lock-free) ---
+	std::atomic<bool> recordingState{ false };
+	std::atomic<bool> playing{ false };
+	std::atomic<int>  recordWritePosition{ 0 };
+	std::atomic<double> currentSampleRate{ 44100.0 };
 	
-	// Playback state
-	bool playing = false;
-	double playbackPosition = 0.0; // サンプル位置
-	double targetScratchSpeed = 1.0;     // 目標再生速度
-	double currentScratchSpeed = 1.0;    // 現在の再生速度（スムーズ変化用）
+	// Playback position — single-writer (audio thread), multi-reader (main/UI).
+	std::atomic<double> playbackPosition{ 0.0 };
+
+	// Scratch speed (written by main, read by audio — single value, atomic)
+	std::atomic<double> targetScratchSpeed{ 1.0 };
 
 	// Sample Slots
 	struct SampleSlot {
