@@ -136,13 +136,16 @@ void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToF
 
 void AudioEngine::loadFile(const juce::File& file)
 {
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
-        std::unique_ptr<juce::AudioFormatReaderSource> newSource(new juce::AudioFormatReaderSource(reader, true));
+        // AudioFormatReaderSource の第2引数 true で reader のライフタイムを委譲
+        std::unique_ptr<juce::AudioFormatReaderSource> newSource(
+            new juce::AudioFormatReaderSource(reader.get(), true));
         transportSource.setSource(newSource.get(), 0, nullptr, reader->sampleRate);
         readerSource.reset(newSource.release());
-        
+        reader.release(); // 所有権を AudioFormatReaderSource に移譲済み
+
         resamplerSource.reset(new juce::ResamplingAudioSource(&transportSource, false, 2));
         
         sendChangeMessage(); 
@@ -302,7 +305,7 @@ juce::File AudioEngine::saveRecordingToFile()
 
 void AudioEngine::loadFileToBuffer(const juce::File& file)
 {
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
         // 録音バッファにファイルの内容をロード
@@ -318,8 +321,6 @@ void AudioEngine::loadFileToBuffer(const juce::File& file)
             playbackPosition = 0.0;
         }
         
-        delete reader;
-        
         sendChangeMessage();
     }
 }
@@ -330,7 +331,7 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
 {
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
     
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
         int numSamples = static_cast<int>(reader->lengthInSamples);
@@ -341,8 +342,6 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
         reader->read(&slot.buffer, 0, numSamples, 0, true, true);
         slot.numSamples = numSamples;
         slot.fileName = file.getFileNameWithoutExtension();
-        
-        delete reader;
         
         // アクティブスロットならメインバッファにもコピー
         if (slotIndex == activeSlotIndex)
