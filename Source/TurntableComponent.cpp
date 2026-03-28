@@ -25,15 +25,13 @@ void TurntableComponent::paint(juce::Graphics& g)
 
 	// --- 描画エリアの計算 ---
 	auto area = getLocalBounds().toFloat();
-	// アーム用のスペースを確保するため、上部に余白を設ける
-	auto discBounds = area.reduced(60, 40);
 
-	// レコードのサイズを少し小さくしてアームのスペースを確保
-	float diameter = juce::jmin(discBounds.getWidth(), discBounds.getHeight()) * 0.85f;
+	// レコード盤を正方形領域に収める（アスペクト比に依存しない）
+	float diameter = juce::jmin(area.getWidth(), area.getHeight()) * 0.85f;
 	float radius = diameter / 2.0f;
-	auto center = discBounds.getCentre();
+	auto center = area.getCentre();
 
-	// レコード盤の正円領域
+	// 正方形のディスク領域を中央に配置
 	juce::Rectangle<float> discArea(center.x - radius, center.y - radius, diameter, diameter);
 
 	// --- 2. レコード盤の描画（リッチバージョン） ---
@@ -118,18 +116,20 @@ void TurntableComponent::paint(juce::Graphics& g)
 	g.restoreState();
 
 	// センターホール（メタリック）
+	float holeSize = juce::jmax(radius * 0.06f, 4.0f);
 	g.setColour(juce::Colour::fromString("FF444444"));
-	g.fillEllipse(center.x - 6, center.y - 6, 12, 12);
+	g.fillEllipse(center.x - holeSize, center.y - holeSize, holeSize * 2, holeSize * 2);
 	g.setColour(juce::Colours::black);
-	g.fillEllipse(center.x - 3, center.y - 3, 6, 6);
+	g.fillEllipse(center.x - holeSize * 0.5f, center.y - holeSize * 0.5f, holeSize, holeSize);
 
 
 	// --- 4. トーンアームの追加描画（リッチバージョン） ---
 
-	juce::Point<float> pivotCenter(discArea.getX() - 30.0f, discArea.getY() - 30.0f);
-	float pivotRadius = 20.0f;
+	// ピボットをディスク外周の左上に配置（アスペクト比に依存しない）
+	juce::Point<float> pivotCenter(discArea.getX() - radius * 0.15f, discArea.getY() - radius * 0.15f);
+	float pivotRadius = juce::jmax(radius * 0.1f, 12.0f);
 	float armLength = radius * 1.3f;
-	float armWidth = 12.0f;
+	float armWidth = juce::jmax(radius * 0.08f, 8.0f);
 
 	float armAngle;
 	if (audioEngine.isPlaying() || isDragging) {
@@ -158,7 +158,7 @@ void TurntableComponent::paint(juce::Graphics& g)
 	g.drawLine(armLine, armWidth);
 
 	// カートリッジ（リッチ版）
-	float cartLength = 30.0f;
+	float cartLength = radius * 0.2f;
 	float cartWidth = armWidth * 1.2f;
 	
 	g.saveState();
@@ -274,8 +274,9 @@ void TurntableComponent::setExpanded(bool shouldExpand)
 float TurntableComponent::getAngleFromPoint(juce::Point<float> p)
 {
 	auto area = getLocalBounds().toFloat();
-	auto discBounds = area.removeFromLeft(area.getWidth() * 0.85f).reduced(10);
-	auto center = discBounds.getCentre();
+	float diameter = juce::jmin(area.getWidth(), area.getHeight()) * 0.85f;
+	float radius = diameter / 2.0f;
+	auto center = area.getCentre();
 	return std::atan2(p.y - center.y, p.x - center.x);
 }
 

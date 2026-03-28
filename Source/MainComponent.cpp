@@ -175,6 +175,8 @@ void MainComponent::resized()
 	auto area = getLocalBounds();
 	const int width = getWidth();
 	const int height = getHeight();
+	const bool isPortrait = height > width; // 縦長画面の判定
+	const float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
 
 	// 【レスポンシブ設定】画面サイズに応じたパラメータ
 	const int headerHeight = juce::jmax(50, height / 15);  // 最低50px、高さの1/15
@@ -200,7 +202,15 @@ void MainComponent::resized()
 	// ライブラリ表示/非表示
 	if (isLibraryOpen)
 	{
-		sampleList->setBounds(area.removeFromRight(sidebarWidth));
+		if (isPortrait)
+		{
+			// 縦画面ではライブラリを下部から展開
+			sampleList->setBounds(area.removeFromBottom(sidebarWidth));
+		}
+		else
+		{
+			sampleList->setBounds(area.removeFromRight(sidebarWidth));
+		}
 	}
 	else
 	{
@@ -217,22 +227,59 @@ void MainComponent::resized()
 		audioSelector->setBounds(0, 0, 0, 0);
 	}
 
-	// 残りのエリアを分割
-	auto bottomControl = area.removeFromBottom(bottomControlHeight);
-	
-	// クロスフェーダーを中央に配置（幅は1/3、高さは1.5倍）
-	const int crossfaderActualHeight = static_cast<int>(crossfaderHeight * 1.5f);
-	auto crossfaderArea = bottomControl.removeFromBottom(crossfaderActualHeight);
-	const int crossfaderWidth = juce::jmin(crossfaderArea.getWidth() / 2, 350); // 幅1/2、最大350px
-	crossfader->setBounds(crossfaderArea.withSizeKeepingCentre(crossfaderWidth, crossfaderActualHeight - 6));
+	if (isPortrait)
+	{
+		// 【縦画面レイアウト】ターンテーブルを正方形に近いアスペクト比で上部に配置
+		// ターンテーブルのサイズを画面幅に基づいて制限（円形レコードの表示に最適化）
+		const int turntableSize = juce::jmin(area.getWidth(), static_cast<int>(area.getWidth() * 1.1f));
+		auto turntableArea = area.removeFromTop(turntableSize);
+		turntable->setBounds(turntableArea);
 
-	waveform->setBounds(bottomControl); // 波形表示
-	
-	// サンプルスロットを左側に配置
-	const int slotWidth = juce::jmax(80, width / 12);
-	sampleSlots->setBounds(area.removeFromLeft(slotWidth));
-	
-	turntable->setBounds(area); // 残りをターンテーブルに
+		// サンプルスロットをターンテーブルの下に水平配置（縦画面用）
+		const int slotHeight = juce::jmax(40, height / 18);
+		sampleSlots->setBounds(area.removeFromTop(slotHeight));
+
+		// 下部コントロールエリア（波形 + クロスフェーダー）
+		auto bottomControl = area;
+
+		// クロスフェーダーを下部に配置
+		const int crossfaderActualHeight = static_cast<int>(crossfaderHeight * 1.5f);
+		auto crossfaderArea = bottomControl.removeFromBottom(crossfaderActualHeight);
+		const int crossfaderWidth = juce::jmin(crossfaderArea.getWidth() / 2, 350);
+		crossfader->setBounds(crossfaderArea.withSizeKeepingCentre(crossfaderWidth, crossfaderActualHeight - 6));
+
+		waveform->setBounds(bottomControl); // 残りを波形表示に
+	}
+	else
+	{
+		// 【横画面レイアウト（既存ロジック + アスペクト比改善）】
+		// 残りのエリアを分割
+		auto bottomControl = area.removeFromBottom(bottomControlHeight);
+
+		// クロスフェーダーを中央に配置（幅は1/3、高さは1.5倍）
+		const int crossfaderActualHeight = static_cast<int>(crossfaderHeight * 1.5f);
+		auto crossfaderArea = bottomControl.removeFromBottom(crossfaderActualHeight);
+		const int crossfaderWidth = juce::jmin(crossfaderArea.getWidth() / 2, 350);
+		crossfader->setBounds(crossfaderArea.withSizeKeepingCentre(crossfaderWidth, crossfaderActualHeight - 6));
+
+		waveform->setBounds(bottomControl); // 波形表示
+
+		// サンプルスロットを左側に配置
+		const int slotWidth = juce::jmax(80, width / 12);
+		sampleSlots->setBounds(area.removeFromLeft(slotWidth));
+
+		// アスペクト比に応じたターンテーブル領域の最適化
+		// 狭い横画面（ aspectRatio < 1.0 の正方形付近）ではターンテーブルを正方形に近づける
+		if (aspectRatio < 1.2f)
+		{
+			const int side = juce::jmin(area.getWidth(), area.getHeight());
+			turntable->setBounds(area.withSizeKeepingCentre(side, side));
+		}
+		else
+		{
+			turntable->setBounds(area);
+		}
+	}
 }
 
 void MainComponent::buttonClicked(juce::Button* button)

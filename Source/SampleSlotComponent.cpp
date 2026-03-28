@@ -44,23 +44,40 @@ SampleSlotComponent::~SampleSlotComponent()
 void SampleSlotComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour::fromString("FF1E293B"));
-    
-    // タイトル
-    g.setColour(juce::Colours::white);
-    g.setFont(juce::FontOptions(14.0f).withStyle("Bold"));
-    g.drawText("SLOTS", getLocalBounds().removeFromTop(25), juce::Justification::centred);
+
+    // タイトルは縦配置モード（横画面）でのみ表示
+    const bool isHorizontal = getWidth() > getHeight() * 2;
+    if (!isHorizontal)
+    {
+        g.setColour(juce::Colours::white);
+        g.setFont(juce::FontOptions(14.0f).withStyle("Bold"));
+        g.drawText("SLOTS", getLocalBounds().removeFromTop(25), juce::Justification::centred);
+    }
 }
 
 void SampleSlotComponent::resized()
 {
     auto area = getLocalBounds().reduced(5);
-    area.removeFromTop(25); // タイトルスペース
-    
-    int slotHeight = area.getHeight() / NUM_SLOTS;
-    
-    for (int i = 0; i < NUM_SLOTS; ++i)
+    const bool isHorizontal = area.getWidth() > area.getHeight() * 2; // 幅が高さの2倍以上なら横配置
+
+    if (isHorizontal)
     {
-        slotButtons[static_cast<size_t>(i)].setBounds(area.removeFromTop(slotHeight).reduced(2));
+        // 横配置モード（縦画面レイアウト用）：スロットを横一列に並べる
+        for (int i = 0; i < NUM_SLOTS; ++i)
+        {
+            slotButtons[static_cast<size_t>(i)].setBounds(area.removeFromLeft(area.getWidth() / (NUM_SLOTS - i)).reduced(2));
+        }
+    }
+    else
+    {
+        // 縦配置モード（従来の横画面レイアウト用）
+        area.removeFromTop(25); // タイトルスペース
+        int slotHeight = area.getHeight() / NUM_SLOTS;
+        
+        for (int i = 0; i < NUM_SLOTS; ++i)
+        {
+            slotButtons[static_cast<size_t>(i)].setBounds(area.removeFromTop(slotHeight).reduced(2));
+        }
     }
 }
 
