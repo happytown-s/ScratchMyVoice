@@ -248,7 +248,7 @@ juce::File AudioEngine::saveRecordingToFile()
 
 void AudioEngine::loadFileToBuffer(const juce::File& file)
 {
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
         // 録音バッファにファイルの内容をロード
@@ -262,8 +262,6 @@ void AudioEngine::loadFileToBuffer(const juce::File& file)
         currentSampleRate = reader->sampleRate;
         playbackPosition = 0.0;
         
-        delete reader;
-        
         sendChangeMessage();
     }
 }
@@ -274,7 +272,7 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
 {
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
     
-    auto* reader = formatManager.createReaderFor(file);
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (reader != nullptr)
     {
         int numSamples = static_cast<int>(reader->lengthInSamples);
@@ -285,8 +283,6 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
         reader->read(&slot.buffer, 0, numSamples, 0, true, true);
         slot.numSamples = numSamples;
         slot.fileName = file.getFileNameWithoutExtension();
-        
-        delete reader;
         
         // アクティブスロットならメインバッファにもコピー
         if (slotIndex == activeSlotIndex)
