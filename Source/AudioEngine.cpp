@@ -6,10 +6,11 @@
 #include "AudioEngine.h"
 
 AudioEngine::AudioEngine()
-: thumbnail(512, formatManager, thumbnailCache)
+: fileThumbnail(512, formatManager, thumbnailCache),
+  recordedThumbnail(512, formatManager, recordedThumbCache)
 {
 	formatManager.registerBasicFormats();
-	
+
 	// 録音バッファを初期化（最大30秒分）
 	recordedBuffer.setSize(2, 44100 * 30);
 	recordedBuffer.clear();
@@ -24,13 +25,13 @@ void AudioEngine::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
     currentSampleRate = sampleRate;
     transportSource.prepareToPlay(samplesPerBlockExpected, sampleRate);
-    
+
     // 録音バッファのサイズを現在のサンプルレートに合わせる（30秒分）
     int maxSamples = static_cast<int>(sampleRate * 30.0);
     recordedBuffer.setSize(2, maxSamples, true, true, true);
-    
+
     crossfaderGain.reset(sampleRate, 0.01); // 10msスムージング
-    
+
     if (resamplerSource)
         resamplerSource->prepareToPlay(samplesPerBlockExpected, sampleRate);
 }
@@ -44,39 +45,41 @@ void AudioEngine::releaseResources()
 
 void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    juce::SpinLock::ScopedLockType lock(recordLock);
+
     // 再生中は録音バッファからスクラッチ再生
     if (playing && recordedBuffer.getNumSamples() > 0 && recordWritePosition > 0)
     {
         auto* outputBuffer = bufferToFill.buffer;
         int numSamplesToFill = bufferToFill.numSamples;
         int numChannels = juce::jmin(outputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
-        
+
         for (int sample = 0; sample < numSamplesToFill; ++sample)
         {
             // 線形補間のためのインデックスと係数を計算
             int pos0 = static_cast<int>(playbackPosition);
             int pos1 = pos0 + 1;
             float frac = static_cast<float>(playbackPosition - pos0);
-            
+
             // バッファ範囲内にクランプ
             pos0 = juce::jlimit(0, recordWritePosition - 1, pos0);
             pos1 = juce::jlimit(0, recordWritePosition - 1, pos1);
-            
+
             float gain = crossfaderGain.getNextValue();
-            
+
             for (int ch = 0; ch < numChannels; ++ch)
             {
                 // 線形補間でサンプル値を計算（ノイズ軽減）
                 float sample0 = recordedBuffer.getSample(ch, pos0);
                 float sample1 = recordedBuffer.getSample(ch, pos1);
                 float interpolatedSample = sample0 + frac * (sample1 - sample0);
-                
+
                 outputBuffer->addSample(ch, bufferToFill.startSample + sample, interpolatedSample * gain);
             }
-            
+
             // 再生位置を進める（スムーズなスピード変化）
             playbackPosition += targetScratchSpeed;
-            
+
             // ループ再生（録音範囲内でループ）
             if (playbackPosition >= recordWritePosition)
                 playbackPosition = 0.0;
@@ -95,11 +98,16 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
 void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
     if (!recordingState) return;
-    
+
+    juce::SpinLock::ScopedLockType lock(recordLock);
+
+    // Re-check after acquiring lock (state may have changed)
+    if (!recordingState) return;
+
     auto* inputBuffer = bufferToFill.buffer;
     int numSamples = bufferToFill.numSamples;
     int numChannels = juce::jmin(inputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
-    
+
     // バッファに余裕があれば書き込み
     if (recordWritePosition + numSamples <= recordedBuffer.getNumSamples())
     {
@@ -108,6 +116,15 @@ void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToF
             recordedBuffer.copyFrom(ch, recordWritePosition,
                                     *inputBuffer, ch, bufferToFill.startSample, numSamples);
         }
+
+        // ── Feed thumbnail (background thread safe) ──────────────────
+        // AudioThumbnail::addBlock is thread-safe and processes data
+        // asynchronously.  This is the key: we NEVER scan the raw buffer
+        // from the UI thread — the thumbnail pre-computes min/max peaks.
+        int numThumbChannels = juce::jmin(numChannels, 2);
+        recordedThumbnail.addBlock(recordWritePosition, *inputBuffer,
+                                   bufferToFill.startSample, numSamples);
+
         recordWritePosition += numSamples;
     }
     else
@@ -115,6 +132,13 @@ void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToF
         // バッファがいっぱいになったら録音停止
         stopRecording();
     }
+}
+
+void AudioEngine::resetRecordedThumbnail()
+{
+    // Reset thumbnail source info so it can be reused for a new recording
+    recordedThumbnail.reset(static_cast<int>(currentSampleRate), 2,
+                            juce::AudioThumbnail::maxNumChannels);
 }
 
 void AudioEngine::loadFile(const juce::File& file)
@@ -125,10 +149,10 @@ void AudioEngine::loadFile(const juce::File& file)
         std::unique_ptr<juce::AudioFormatReaderSource> newSource(new juce::AudioFormatReaderSource(reader, true));
         transportSource.setSource(newSource.get(), 0, nullptr, reader->sampleRate);
         readerSource.reset(newSource.release());
-        
+
         resamplerSource.reset(new juce::ResamplingAudioSource(&transportSource, false, 2));
-        
-        sendChangeMessage(); 
+
+        sendChangeMessage();
     }
 }
 
@@ -158,22 +182,33 @@ void AudioEngine::setCrossfaderGain(float gain)
 
 void AudioEngine::startRecording()
 {
-    recordWritePosition = 0;
-    recordedBuffer.clear();
-    recordingState = true;
-    playing = false; // 録音中は再生停止
+    {
+        juce::SpinLock::ScopedLockType lock(recordLock);
+        recordWritePosition = 0;
+        recordedBuffer.clear();
+        recordingState = true;
+        playing = false; // 録音中は再生停止
+    }
+
+    // Reset the thumbnail for the new recording (outside lock)
+    resetRecordedThumbnail();
+
     sendChangeMessage();
 }
 
 void AudioEngine::stopRecording()
 {
-    recordingState = false;
-    playbackPosition = 0.0;
+    {
+        juce::SpinLock::ScopedLockType lock(recordLock);
+        recordingState = false;
+        playbackPosition = 0.0;
+    }
     sendChangeMessage();
 }
 
 void AudioEngine::setPlaybackPosition(double normalizedPosition)
 {
+    juce::SpinLock::ScopedLockType lock(recordLock);
     if (recordWritePosition > 0)
     {
         playbackPosition = normalizedPosition * recordWritePosition;
@@ -183,6 +218,7 @@ void AudioEngine::setPlaybackPosition(double normalizedPosition)
 
 double AudioEngine::getPlaybackPosition() const
 {
+    juce::SpinLock::ScopedLockType lock(const_cast<juce::SpinLock&>(recordLock));
     if (recordWritePosition > 0)
         return playbackPosition / recordWritePosition;
     return 0.0;
@@ -205,44 +241,59 @@ juce::File AudioEngine::getLibraryFolder() const
     auto folder = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("ScratchMyVoice")
         .getChildFile("Library");
-    
+
     if (!folder.exists())
         folder.createDirectory();
-    
+
     return folder;
 }
 
 juce::File AudioEngine::saveRecordingToFile()
 {
-    if (recordWritePosition <= 0)
-        return juce::File();
-    
+    int samplesToSave = 0;
+    double sr = currentSampleRate;
+    unsigned int numCh = 2;
+    juce::AudioBuffer<float> localCopy;
+
+    {
+        juce::SpinLock::ScopedLockType lock(recordLock);
+
+        if (recordWritePosition <= 0)
+            return juce::File();
+
+        samplesToSave = recordWritePosition;
+        sr = currentSampleRate;
+        numCh = static_cast<unsigned int>(recordedBuffer.getNumChannels());
+        localCopy.makeCopyOf(recordedBuffer);
+    }
+    // Lock released — safe to do file I/O without blocking the audio thread
+
     auto libraryFolder = getLibraryFolder();
-    
+
     // タイムスタンプでファイル名を生成
     auto now = juce::Time::getCurrentTime();
     auto fileName = now.formatted("Recording_%Y%m%d_%H%M%S.wav");
     auto outputFile = libraryFolder.getChildFile(fileName);
-    
+
     // WAVファイルとして保存
     juce::WavAudioFormat wavFormat;
     std::unique_ptr<juce::AudioFormatWriter> writer(
         wavFormat.createWriterFor(
             new juce::FileOutputStream(outputFile),
-            currentSampleRate,
-            static_cast<unsigned int>(recordedBuffer.getNumChannels()),
+            sr,
+            numCh,
             16, // bits per sample
             {},
             0
         )
     );
-    
+
     if (writer != nullptr)
     {
-        writer->writeFromAudioSampleBuffer(recordedBuffer, 0, recordWritePosition);
+        writer->writeFromAudioSampleBuffer(localCopy, 0, samplesToSave);
         return outputFile;
     }
-    
+
     return juce::File();
 }
 
@@ -254,16 +305,31 @@ void AudioEngine::loadFileToBuffer(const juce::File& file)
         // 録音バッファにファイルの内容をロード
         int numSamples = static_cast<int>(reader->lengthInSamples);
         int numChannels = static_cast<int>(reader->numChannels);
-        
-        recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
-        reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
-        
-        recordWritePosition = numSamples;
-        currentSampleRate = reader->sampleRate;
-        playbackPosition = 0.0;
-        
+
+        {
+            juce::SpinLock::ScopedLockType lock(recordLock);
+            recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
+            reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
+
+            recordWritePosition = numSamples;
+            currentSampleRate = reader->sampleRate;
+            playbackPosition = 0.0;
+        }
+
         delete reader;
-        
+
+        // ── Populate thumbnail from loaded file data ──────────────────
+        // Feed the entire loaded buffer into the thumbnail so the waveform
+        // is available immediately without UI thread scanning.
+        resetRecordedThumbnail();
+        // addBlock in chunks (safe even for large buffers)
+        const int chunkSize = 32768;
+        for (int offset = 0; offset < numSamples; offset += chunkSize)
+        {
+            int thisChunk = juce::jmin(chunkSize, numSamples - offset);
+            recordedThumbnail.addBlock(offset, recordedBuffer, offset, thisChunk);
+        }
+
         sendChangeMessage();
     }
 }
@@ -273,27 +339,27 @@ void AudioEngine::loadFileToBuffer(const juce::File& file)
 void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
 {
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
-    
+
     auto* reader = formatManager.createReaderFor(file);
     if (reader != nullptr)
     {
         int numSamples = static_cast<int>(reader->lengthInSamples);
         int numChannels = static_cast<int>(reader->numChannels);
-        
+
         auto& slot = sampleSlots[static_cast<size_t>(slotIndex)];
         slot.buffer.setSize(juce::jmax(2, numChannels), numSamples);
         reader->read(&slot.buffer, 0, numSamples, 0, true, true);
         slot.numSamples = numSamples;
         slot.fileName = file.getFileNameWithoutExtension();
-        
+
         delete reader;
-        
+
         // アクティブスロットならメインバッファにもコピー
         if (slotIndex == activeSlotIndex)
         {
             setActiveSlot(slotIndex);
         }
-        
+
         sendChangeMessage();
     }
 }
@@ -301,17 +367,30 @@ void AudioEngine::loadFileToSlot(int slotIndex, const juce::File& file)
 void AudioEngine::setActiveSlot(int slotIndex)
 {
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
-    
+
     activeSlotIndex = slotIndex;
-    
+
     const auto& slot = sampleSlots[static_cast<size_t>(slotIndex)];
     if (slot.numSamples > 0)
     {
-        // スロットのバッファをメイン再生バッファにコピー
-        recordedBuffer.makeCopyOf(slot.buffer);
-        recordWritePosition = slot.numSamples;
-        playbackPosition = 0.0;
-        
+        {
+            juce::SpinLock::ScopedLockType lock(recordLock);
+            // スロットのバッファをメイン再生バッファにコピー
+            recordedBuffer.makeCopyOf(slot.buffer);
+            recordWritePosition = slot.numSamples;
+            playbackPosition = 0.0;
+        }
+
+        // Populate thumbnail for the new slot content (outside lock)
+        resetRecordedThumbnail();
+        const int numSamples = slot.numSamples;
+        const int chunkSize = 32768;
+        for (int offset = 0; offset < numSamples; offset += chunkSize)
+        {
+            int thisChunk = juce::jmin(chunkSize, numSamples - offset);
+            recordedThumbnail.addBlock(offset, recordedBuffer, offset, thisChunk);
+        }
+
         sendChangeMessage();
     }
 }
@@ -327,4 +406,3 @@ bool AudioEngine::isSlotLoaded(int slotIndex) const
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return false;
     return sampleSlots[static_cast<size_t>(slotIndex)].numSamples > 0;
 }
-
