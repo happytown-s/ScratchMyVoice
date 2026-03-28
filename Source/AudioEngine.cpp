@@ -22,12 +22,16 @@ AudioEngine::~AudioEngine()
 
 void AudioEngine::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
-    currentSampleRate = sampleRate;
+    currentSampleRate.store(sampleRate, std::memory_order_relaxed);
     transportSource.prepareToPlay(samplesPerBlockExpected, sampleRate);
     
     // 録音バッファのサイズを現在のサンプルレートに合わせる（30秒分）
     int maxSamples = static_cast<int>(sampleRate * 30.0);
-    recordedBuffer.setSize(2, maxSamples, true, true, true);
+    
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        recordedBuffer.setSize(2, maxSamples, true, true, true);
+    }
     
     crossfaderGain.reset(sampleRate, 0.01); // 10msスムージング
     
@@ -45,8 +49,14 @@ void AudioEngine::releaseResources()
 void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
     // 再生中は録音バッファからスクラッチ再生
-    if (playing && recordedBuffer.getNumSamples() > 0 && recordWritePosition > 0)
+    if (playing.load(std::memory_order_relaxed) && recordedBuffer.getNumSamples() > 0)
     {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        
+        int localRecordWritePosition = recordWritePosition.load(std::memory_order_relaxed);
+        if (localRecordWritePosition <= 0)
+            return;
+
         auto* outputBuffer = bufferToFill.buffer;
         int numSamplesToFill = bufferToFill.numSamples;
         int numChannels = juce::jmin(outputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
@@ -59,8 +69,8 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
             float frac = static_cast<float>(playbackPosition - pos0);
             
             // バッファ範囲内にクランプ
-            pos0 = juce::jlimit(0, recordWritePosition - 1, pos0);
-            pos1 = juce::jlimit(0, recordWritePosition - 1, pos1);
+            pos0 = juce::jlimit(0, localRecordWritePosition - 1, pos0);
+            pos1 = juce::jlimit(0, localRecordWritePosition - 1, pos1);
             
             float gain = crossfaderGain.getNextValue();
             
@@ -78,10 +88,10 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
             playbackPosition += targetScratchSpeed;
             
             // ループ再生（録音範囲内でループ）
-            if (playbackPosition >= recordWritePosition)
+            if (playbackPosition >= localRecordWritePosition)
                 playbackPosition = 0.0;
             else if (playbackPosition < 0.0)
-                playbackPosition = recordWritePosition - 1;
+                playbackPosition = localRecordWritePosition - 1;
         }
     }
     else
@@ -94,26 +104,33 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
 
 void AudioEngine::recordAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    if (!recordingState) return;
+    if (!recordingState.load(std::memory_order_acquire)) return;
     
     auto* inputBuffer = bufferToFill.buffer;
     int numSamples = bufferToFill.numSamples;
-    int numChannels = juce::jmin(inputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
     
-    // バッファに余裕があれば書き込み
-    if (recordWritePosition + numSamples <= recordedBuffer.getNumSamples())
     {
-        for (int ch = 0; ch < numChannels; ++ch)
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        
+        int numChannels = juce::jmin(inputBuffer->getNumChannels(), recordedBuffer.getNumChannels());
+        int localRecordWritePosition = recordWritePosition.load(std::memory_order_relaxed);
+        
+        // バッファに余裕があれば書き込み
+        if (localRecordWritePosition + numSamples <= recordedBuffer.getNumSamples())
         {
-            recordedBuffer.copyFrom(ch, recordWritePosition,
-                                    *inputBuffer, ch, bufferToFill.startSample, numSamples);
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                recordedBuffer.copyFrom(ch, localRecordWritePosition,
+                                        *inputBuffer, ch, bufferToFill.startSample, numSamples);
+            }
+            recordWritePosition.store(localRecordWritePosition + numSamples, std::memory_order_release);
         }
-        recordWritePosition += numSamples;
-    }
-    else
-    {
-        // バッファがいっぱいになったら録音停止
-        stopRecording();
+        else
+        {
+            // バッファがいっぱいになったら録音停止
+            recordingState.store(false, std::memory_order_release);
+            playbackPosition = 0.0;
+        }
     }
 }
 
@@ -136,14 +153,16 @@ void AudioEngine::play()
 {
     if (hasRecordedAudio())
     {
-        playing = true;
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        playing.store(true, std::memory_order_release);
         targetScratchSpeed = 1.0;
+        playbackPosition = 0.0;
     }
 }
 
 void AudioEngine::stop()
 {
-    playing = false;
+    playing.store(false, std::memory_order_release);
 }
 
 void AudioEngine::setScratchRate(double rate)
@@ -158,33 +177,46 @@ void AudioEngine::setCrossfaderGain(float gain)
 
 void AudioEngine::startRecording()
 {
-    recordWritePosition = 0;
-    recordedBuffer.clear();
-    recordingState = true;
-    playing = false; // 録音中は再生停止
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        recordWritePosition.store(0, std::memory_order_relaxed);
+        recordedBuffer.clear();
+        playbackPosition = 0.0;
+    }
+    recordingState.store(true, std::memory_order_release);
+    playing.store(false, std::memory_order_release);
     sendChangeMessage();
 }
 
 void AudioEngine::stopRecording()
 {
-    recordingState = false;
-    playbackPosition = 0.0;
+    recordingState.store(false, std::memory_order_release);
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        playbackPosition = 0.0;
+    }
     sendChangeMessage();
 }
 
 void AudioEngine::setPlaybackPosition(double normalizedPosition)
 {
-    if (recordWritePosition > 0)
+    int localRecordWritePosition = recordWritePosition.load(std::memory_order_relaxed);
+    if (localRecordWritePosition > 0)
     {
-        playbackPosition = normalizedPosition * recordWritePosition;
-        playbackPosition = juce::jlimit(0.0, static_cast<double>(recordWritePosition - 1), playbackPosition);
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        playbackPosition = normalizedPosition * localRecordWritePosition;
+        playbackPosition = juce::jlimit(0.0, static_cast<double>(localRecordWritePosition - 1), playbackPosition);
     }
 }
 
 double AudioEngine::getPlaybackPosition() const
 {
-    if (recordWritePosition > 0)
-        return playbackPosition / recordWritePosition;
+    int localRecordWritePosition = recordWritePosition.load(std::memory_order_relaxed);
+    if (localRecordWritePosition > 0)
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        return playbackPosition / localRecordWritePosition;
+    }
     return 0.0;
 }
 
@@ -197,6 +229,18 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     // 必要に応じて実装
     juce::ignoreUnused(source);
+}
+
+juce::AudioBuffer<float> AudioEngine::getRecordedBufferCopy() const
+{
+    juce::SpinLock::ScopedLockType lock(bufferLock);
+    juce::AudioBuffer<float> copy;
+    int localRecordWritePosition = recordWritePosition.load(std::memory_order_relaxed);
+    if (localRecordWritePosition > 0)
+    {
+        copy.makeCopyOf(recordedBuffer);
+    }
+    return copy;
 }
 
 juce::File AudioEngine::getLibraryFolder() const
@@ -214,7 +258,8 @@ juce::File AudioEngine::getLibraryFolder() const
 
 juce::File AudioEngine::saveRecordingToFile()
 {
-    if (recordWritePosition <= 0)
+    int localRecordWritePosition = recordWritePosition.load(std::memory_order_relaxed);
+    if (localRecordWritePosition <= 0)
         return juce::File();
     
     auto libraryFolder = getLibraryFolder();
@@ -224,12 +269,18 @@ juce::File AudioEngine::saveRecordingToFile()
     auto fileName = now.formatted("Recording_%Y%m%d_%H%M%S.wav");
     auto outputFile = libraryFolder.getChildFile(fileName);
     
-    // WAVファイルとして保存
+    // WAVファイルとして保存（バッファ内容をロック内でスナップショット）
+    double localSampleRate;
+    {
+        juce::SpinLock::ScopedLockType lock(bufferLock);
+        localSampleRate = currentSampleRate.load(std::memory_order_relaxed);
+    }
+    
     juce::WavAudioFormat wavFormat;
     std::unique_ptr<juce::AudioFormatWriter> writer(
         wavFormat.createWriterFor(
             new juce::FileOutputStream(outputFile),
-            currentSampleRate,
+            localSampleRate,
             static_cast<unsigned int>(recordedBuffer.getNumChannels()),
             16, // bits per sample
             {},
@@ -239,7 +290,10 @@ juce::File AudioEngine::saveRecordingToFile()
     
     if (writer != nullptr)
     {
-        writer->writeFromAudioSampleBuffer(recordedBuffer, 0, recordWritePosition);
+        {
+            juce::SpinLock::ScopedLockType lock(bufferLock);
+            writer->writeFromAudioSampleBuffer(recordedBuffer, 0, localRecordWritePosition);
+        }
         return outputFile;
     }
     
@@ -255,12 +309,14 @@ void AudioEngine::loadFileToBuffer(const juce::File& file)
         int numSamples = static_cast<int>(reader->lengthInSamples);
         int numChannels = static_cast<int>(reader->numChannels);
         
-        recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
-        reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
-        
-        recordWritePosition = numSamples;
-        currentSampleRate = reader->sampleRate;
-        playbackPosition = 0.0;
+        {
+            juce::SpinLock::ScopedLockType lock(bufferLock);
+            recordedBuffer.setSize(juce::jmax(2, numChannels), numSamples);
+            reader->read(&recordedBuffer, 0, numSamples, 0, true, true);
+            recordWritePosition.store(numSamples, std::memory_order_release);
+            currentSampleRate.store(reader->sampleRate, std::memory_order_relaxed);
+            playbackPosition = 0.0;
+        }
         
         delete reader;
         
@@ -308,9 +364,12 @@ void AudioEngine::setActiveSlot(int slotIndex)
     if (slot.numSamples > 0)
     {
         // スロットのバッファをメイン再生バッファにコピー
-        recordedBuffer.makeCopyOf(slot.buffer);
-        recordWritePosition = slot.numSamples;
-        playbackPosition = 0.0;
+        {
+            juce::SpinLock::ScopedLockType lock(bufferLock);
+            recordedBuffer.makeCopyOf(slot.buffer);
+            recordWritePosition.store(slot.numSamples, std::memory_order_release);
+            playbackPosition = 0.0;
+        }
         
         sendChangeMessage();
     }
@@ -327,4 +386,3 @@ bool AudioEngine::isSlotLoaded(int slotIndex) const
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return false;
     return sampleSlots[static_cast<size_t>(slotIndex)].numSamples > 0;
 }
-

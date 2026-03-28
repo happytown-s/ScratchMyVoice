@@ -90,7 +90,7 @@ void WaveformComponent::updateWaveformPath()
 {
 	waveformPath.clear();
 	
-	const auto& buffer = audioEngine.getRecordedBuffer();
+	auto buffer = audioEngine.getRecordedBufferCopy();
 	int numSamples = audioEngine.getRecordedSamplesCount(); // 実際に録音されたサンプル数を使用
 	
 	if (numSamples <= 0) return;
