@@ -24,10 +24,14 @@ class WaveformComponent : public juce::Component,
 	void updateWaveformPath();
 
 	private:
+	void updateWaveformPathIncremental();
+	void drawWaveformFromThumbnail(juce::Graphics& g);
+
 	AudioEngine& audioEngine;
 	bool isExpanded = false;
 	juce::Path waveformPath;
 	int cachedBufferSize = 0;
+	bool cachedForFinishedRecording = false;
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
 };
