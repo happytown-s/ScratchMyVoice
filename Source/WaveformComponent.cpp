@@ -2,7 +2,8 @@
  ==============================================================================
  WaveformComponent.cpp
  ==============================================================================
- Fixes #5 — waveform drawing no longer blocks the UI thread.
+ Issue #5  — waveform drawing no longer blocks the UI thread.
+ Issue #15 — Pinch-to-zoom, double-tap reset, flick-to-scroll.
 
  Performance strategy
  --------------------
@@ -28,6 +29,9 @@
 WaveformComponent::WaveformComponent (AudioEngine& engine)
     : audioEngine (engine)
 {
+    // Enable multi-touch for pinch-zoom gestures
+    setInterceptsMouseClicks (true, true);
+
     // AudioEngineの変更を監視
     audioEngine.addChangeListener (this);
     startTimer (40); // 25fps
@@ -56,18 +60,46 @@ void WaveformComponent::paint (juce::Graphics& g)
         return;
     }
 
+    // ── Zoom & scroll clip region (Issue #15) ──────────────────────────
+    float visibleFraction = 1.0f / juce::jmax (zoomLevel, 1.0f);
+
+    // Apply clip for scrolled view
+    g.saveState();
+    g.reduceClipRegion (bounds.toNearestInt());
+
+    // Scale waveform path for zoom
+    juce::AffineTransform zoomTransform;
+    float scaledWidth = bounds.getWidth() * zoomLevel;
+    float xOffset = -scrollOffset * (scaledWidth - bounds.getWidth());
+    zoomTransform = juce::AffineTransform::scale (zoomLevel).translated (xOffset, 0.0f);
+
     // 波形の描画 — cached pathをblitするだけ (O(width))
     g.setColour (juce::Colour::fromString ("FF22C55E")); // 緑
-    g.strokePath (waveformPath, juce::PathStrokeType (1.5f));
+    g.strokePath (waveformPath, juce::PathStrokeType (1.5f), zoomTransform);
 
     // 再生位置インジケーター
     if (audioEngine.hasRecordedAudio())
     {
         double pos = audioEngine.getPlaybackPosition();
-        float x = bounds.getX() + static_cast<float> (pos) * bounds.getWidth();
+        float x = bounds.getX() + static_cast<float> (pos) * bounds.getWidth() * zoomLevel + xOffset;
 
-        g.setColour (juce::Colours::white);
-        g.drawLine (x, bounds.getY(), x, bounds.getBottom(), 2.0f);
+        // Only draw if visible
+        if (x >= bounds.getX() && x <= bounds.getRight())
+        {
+            g.setColour (juce::Colours::white);
+            g.drawLine (x, bounds.getY(), x, bounds.getBottom(), 2.0f);
+        }
+    }
+
+    g.restoreState();
+
+    // ── Zoom level indicator ────────────────────────────────────────────
+    if (zoomLevel > 1.05f)
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.7f));
+        g.setFont (11.0f);
+        g.drawText (juce::String::formatted ("%.1fx", (double) zoomLevel),
+                    bounds.removeFromBottom (16.0f), juce::Justification::centredRight, false);
     }
 }
 
@@ -84,10 +116,35 @@ void WaveformComponent::timerCallback()
     // 録音中または再生中は再描画
     if (audioEngine.isRecording() || audioEngine.isPlaying())
     {
-        // Check if waveform path needs rebuilding (new samples during recording,
-        // or width changed).  rebuildWaveformPath() is O(width) — not O(numSamples).
         rebuildWaveformPath();
         repaint();
+        return;
+    }
+
+    // ── Flick momentum animation (Issue #15) ────────────────────────────
+    if (std::abs (flickVelocity) > 5.0f)
+    {
+        double now = juce::Time::getMillisecondCounterHiRes();
+        double dt = (now - lastFlickTime) * 0.001;
+        lastFlickTime = now;
+
+        if (dt > 0.0 && dt < 0.2)
+        {
+            float visibleFraction = 1.0f / juce::jmax (zoomLevel, 1.0f);
+            float maxScroll = 1.0f - visibleFraction;
+
+            scrollOffset += flickVelocity * dt * 0.001f;
+            scrollOffset = juce::jlimit (0.0f, juce::jmax (maxScroll, 0.0f), scrollOffset);
+
+            // Apply friction
+            flickVelocity *= 0.92f;
+
+            repaint();
+        }
+    }
+    else if (std::abs (flickVelocity) > 0.0f)
+    {
+        flickVelocity = 0.0f;
     }
 }
 
@@ -97,6 +154,8 @@ void WaveformComponent::changeListenerCallback (juce::ChangeBroadcaster* /*sourc
     // Recording started/stopped or file loaded → full rebuild needed
     cachedPathWidth = 0;
     cachedThumbHash = 0;
+    zoomLevel = 1.0f;
+    scrollOffset = 0.0f;
     rebuildWaveformPath();
     repaint();
 }
@@ -109,6 +168,210 @@ void WaveformComponent::setExpanded (bool shouldExpand)
         isExpanded = shouldExpand;
         cachedPathWidth = 0;
         resized();
+    }
+}
+
+// ─── Mouse interaction (desktop) ─────────────────────────────────────────────
+
+void WaveformComponent::mouseDrag (const juce::MouseEvent& e)
+{
+    float visibleFraction = 1.0f / juce::jmax (zoomLevel, 1.0f);
+    float maxScroll = 1.0f - visibleFraction;
+    if (maxScroll <= 0.0f) return;
+
+    float dx = e.getDistanceFromDragStartX() - e.mouseDownPosition.getX();
+    float width = (float) getWidth();
+    if (width <= 0.0f) return;
+
+    scrollOffset -= dx / (width * visibleFraction);
+    scrollOffset = juce::jlimit (0.0f, maxScroll, scrollOffset);
+    repaint();
+}
+
+void WaveformComponent::mouseWheelMove (const juce::MouseEvent& e,
+                                         const juce::MouseWheelDetails& wheel)
+{
+    juce::ignoreUnused (e);
+
+    if (wheel.deltaY != 0.0f)
+    {
+        // Ctrl+scroll or Shift+scroll → zoom
+        if (e.mods.isCtrlDown() || e.mods.isShiftDown())
+        {
+            float oldZoom = zoomLevel;
+            zoomLevel *= (wheel.deltaY > 0.0f) ? 1.15f : (1.0f / 1.15f);
+            zoomLevel = juce::jlimit (1.0f, 20.0f, zoomLevel);
+
+            // Zoom towards mouse position
+            if (oldZoom > 0.0f && getWidth() > 0)
+            {
+                float mouseX = (float) e.position.x / (float) getWidth();
+                float oldScrollCenter = scrollOffset + mouseX / oldZoom;
+                float newScrollCenter = scrollOffset + mouseX / zoomLevel;
+                scrollOffset += (oldScrollCenter - newScrollCenter) * 0.5f;
+            }
+
+            clampScroll();
+            cachedPathWidth = 0; // rebuild for new zoom
+            rebuildWaveformPath();
+        }
+        else
+        {
+            // Normal scroll
+            float visibleFraction = 1.0f / juce::jmax (zoomLevel, 1.0f);
+            float maxScroll = 1.0f - visibleFraction;
+            scrollOffset += wheel.deltaY * 0.1f;
+            scrollOffset = juce::jlimit (0.0f, juce::jmax (maxScroll, 0.0f), scrollOffset);
+        }
+        repaint();
+    }
+}
+
+// ─── Touch interaction (Issue #15) ───────────────────────────────────────────
+
+void WaveformComponent::touchStarted (const juce::TouchEvent& e)
+{
+    flickVelocity = 0.0f;
+
+    if (e.getTouches().size() == 1)
+    {
+        const auto& touch = e.getTouch (e.stack.size() - 1);
+        primaryTouchIndex = touch.getIndex();
+
+        // ── Double-tap detection ─────────────────────────────────────────
+        double now = juce::Time::getMillisecondCounterHiRes();
+        float dx = touch.position.x - lastTapPos.x;
+        float dy = touch.position.y - lastTapPos.y;
+        float dist = std::sqrt (dx * dx + dy * dy);
+
+        if (dist < 30.0f && (now - lastTapTime) < doubleTapThreshold)
+        {
+            // Double-tap → reset zoom to fit
+            zoomLevel = 1.0f;
+            scrollOffset = 0.0f;
+            cachedPathWidth = 0;
+            rebuildWaveformPath();
+            repaint();
+            lastTapTime = 0.0; // prevent triple-tap
+            return;
+        }
+
+        lastTapTime = now;
+        lastTapPos = touch.position;
+        lastFlickTime = now;
+        lastFlickX = touch.position.x;
+    }
+    else if (e.getTouches().size() >= 2 && primaryTouchIndex >= 0)
+    {
+        // ── Pinch-zoom start ────────────────────────────────────────────
+        juce::Point<float> p1, p2;
+        bool found1 = false, found2 = false;
+
+        for (const auto& t : e.getTouches())
+        {
+            if (t.getIndex() == primaryTouchIndex) { p1 = t.position; found1 = true; }
+            else if (!found2) { p2 = t.position; secondaryTouchIndex = t.getIndex(); found2 = true; }
+        }
+
+        if (found1 && found2)
+        {
+            pinchStartDistance = p1.getDistanceFrom (p2);
+            pinchStartZoom = zoomLevel;
+            isPinching = true;
+            flickVelocity = 0.0f;
+        }
+    }
+}
+
+void WaveformComponent::touchMoved (const juce::TouchEvent& e)
+{
+    const auto& touches = e.getTouches();
+
+    if (isPinching && touches.size() >= 2)
+    {
+        // ── Pinch-to-zoom ───────────────────────────────────────────────
+        juce::Point<float> p1, p2;
+        bool found1 = false, found2 = false;
+
+        for (const auto& t : touches)
+        {
+            if (t.getIndex() == primaryTouchIndex) { p1 = t.position; found1 = true; }
+            if (t.getIndex() == secondaryTouchIndex) { p2 = t.position; found2 = true; }
+        }
+
+        if (found1 && found2 && pinchStartDistance > 1.0f)
+        {
+            float currentDistance = p1.getDistanceFrom (p2);
+            float scale = currentDistance / pinchStartDistance;
+
+            zoomLevel = pinchStartZoom * scale;
+            zoomLevel = juce::jlimit (1.0f, 20.0f, zoomLevel);
+
+            // Pinch center → adjust scroll to zoom toward center
+            juce::Point<float> pinchCenter = (p1 + p2) * 0.5f;
+            float centerNorm = pinchCenter.x / (float) getWidth();
+
+            float oldZoom = pinchStartZoom;
+            if (oldZoom > 0.0f)
+            {
+                float visibleFraction = 1.0f / zoomLevel;
+                float maxScroll = 1.0f - visibleFraction;
+                scrollOffset = centerNorm - centerNorm / zoomLevel;
+                scrollOffset = juce::jlimit (0.0f, juce::jmax (maxScroll, 0.0f), scrollOffset);
+            }
+
+            cachedPathWidth = 0;
+            rebuildWaveformPath();
+            repaint();
+        }
+    }
+    else if (!isPinching && primaryTouchIndex >= 0 && touches.size() == 1)
+    {
+        // ── Single-touch scroll with flick tracking ─────────────────────
+        const auto& touch = e.getTouch (primaryTouchIndex);
+        if (!touch.isValid()) return;
+
+        float visibleFraction = 1.0f / juce::jmax (zoomLevel, 1.0f);
+        if (visibleFraction >= 1.0f) return;
+
+        double now = juce::Time::getMillisecondCounterHiRes();
+        double dt = now - lastFlickTime;
+        float dx = touch.position.x - lastFlickX;
+
+        if (dt > 0.0 && dt < 200.0)
+        {
+            flickVelocity = dx / (float) dt * 1000.0f; // px/s
+        }
+
+        lastFlickTime = now;
+        lastFlickX = touch.position.x;
+
+        float maxScroll = 1.0f - visibleFraction;
+        float width = (float) getWidth();
+        if (width > 0.0f)
+        {
+            scrollOffset -= dx / (width * visibleFraction);
+            scrollOffset = juce::jlimit (0.0f, juce::jmax (maxScroll, 0.0f), scrollOffset);
+            repaint();
+        }
+    }
+}
+
+void WaveformComponent::touchEnded (const juce::TouchEvent& e)
+{
+    const auto& endedTouch = e.getTouch (e.stack.size() - 1);
+
+    if (endedTouch.getIndex() == secondaryTouchIndex)
+    {
+        secondaryTouchIndex = -1;
+        isPinching = false;
+    }
+    else if (endedTouch.getIndex() == primaryTouchIndex)
+    {
+        primaryTouchIndex = -1;
+        isPinching = false;
+        secondaryTouchIndex = -1;
+        // Flick momentum continues via timerCallback
     }
 }
 
@@ -158,8 +421,6 @@ void WaveformComponent::rebuildWaveformPath()
 
         float minValue = 0.0f, maxValue = 0.0f;
 
-        // getMinAndMaxChannel is O(1) — reads pre-computed peaks from
-        // the AudioThumbnail's internal cache.  NO raw sample scanning.
         if (thumb.getMinAndMaxChannel (0,
                                        static_cast<int64> (startSample),
                                        static_cast<int64> (endSample),
@@ -203,4 +464,12 @@ void WaveformComponent::rebuildWaveformPath()
     // Update cache stamps
     cachedPathWidth = currentWidth;
     cachedThumbHash = totalFinished;
+}
+
+// ── Helper ──────────────────────────────────────────────────────────────────
+void WaveformComponent::clampScroll()
+{
+    float visibleFraction = 1.0f / juce::jmax (zoomLevel, 1.0f);
+    float maxScroll = 1.0f - visibleFraction;
+    scrollOffset = juce::jlimit (0.0f, juce::jmax (maxScroll, 0.0f), scrollOffset);
 }
