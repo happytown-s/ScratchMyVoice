@@ -2,25 +2,7 @@
  ==============================================================================
  WaveformComponent.h
  ==============================================================================
- Fixes #5 — waveform drawing no longer blocks the UI thread.
-
- Performance strategy
- --------------------
- 1. juce::AudioThumbnail (inside AudioEngine) computes min/max peaks
-    asynchronously in its own thread.  We NEVER touch the raw AudioBuffer
-    from the UI thread — only call thumbnail.getMinAndMaxChannel(), which
-    is O(1) per call (pre-computed peaks).
-
- 2. A juce::Path is cached and only rebuilt when the component's width or
-    the underlying audio content actually changes (detected via thumbnail
-    sample count).  Repaint only blits the cached path — O(width).
-
- 3. During recording the thumbnail grows in a background thread; each
-    timer tick checks if more samples are available and only then rebuilds
-    the path — still O(width), never O(numSamples).
-
- 4. The path rebuild is decoupled from paint() — it happens in the timer
-    callback, so paint() only ever calls strokePath() on a ready-made path.
+ Issue #15 — Pinch-to-zoom, double-tap reset, flick-to-scroll
  ==============================================================================
  */
 #pragma once
@@ -40,22 +22,52 @@ public:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
 
+    // Mouse interaction (desktop)
+    void mouseDrag (const juce::MouseEvent& e) override;
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+
+    // Touch interaction (Issue #15)
+    void touchStarted (const juce::TouchEvent& e) override;
+    void touchMoved (const juce::TouchEvent& e) override;
+    void touchEnded (const juce::TouchEvent& e) override;
+
     void setExpanded (bool shouldExpand);
 
 private:
     // Rebuild waveformPath from AudioThumbnail.  O(width), NOT O(numSamples).
-    // Called only from timerCallback / changeListenerCallback, never from paint().
     void rebuildWaveformPath();
+    void clampScroll();
 
     AudioEngine& audioEngine;
     bool isExpanded = false;
+
+    // ── Waveform zoom & scroll (Issue #15) ─────────────────────────────────
+    float zoomLevel = 1.0f;          // 1.0 = fit all, 2.0 = 2x zoom, etc.
+    float scrollOffset = 0.0f;       // 0..1 normalized scroll position
+
+    // ── Pinch-zoom state ───────────────────────────────────────────────────
+    int  primaryTouchIndex = -1;
+    int  secondaryTouchIndex = -1;
+    float pinchStartDistance = 0.0f;
+    float pinchStartZoom = 1.0f;
+    bool isPinching = false;
+
+    // ── Flick (momentum) state ─────────────────────────────────────────────
+    float flickVelocity = 0.0f;      // pixels per second
+    double lastFlickTime = 0.0;
+    float lastFlickX = 0.0f;
+
+    // ── Double-tap state ───────────────────────────────────────────────────
+    double lastTapTime = 0.0;
+    juce::Point<float> lastTapPos;
+    static constexpr double doubleTapThreshold = 300.0; // ms
 
     // ── Cached waveform path ──────────────────────────────────────────────
     juce::Path waveformPath;
 
     // Cache stamps — skip rebuild when nothing changed
-    int   cachedPathWidth   = 0;   // getWidth() when path was last built
-    int64 cachedThumbHash   = 0;   // thumb.getNumSamplesFinished() at last build
+    int   cachedPathWidth   = 0;
+    int64 cachedThumbHash   = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaveformComponent)
 };

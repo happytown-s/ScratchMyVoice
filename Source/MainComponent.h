@@ -2,6 +2,9 @@
  ==============================================================================
  MainComponent.h
  ==============================================================================
+ Issue #13 — Responsive aspect ratio for all components
+ Issue #16 — Mobile-first layout redesign with FlexBox
+ ==============================================================================
  */
 #pragma once
 #include <JuceHeader.h>
@@ -46,6 +49,7 @@ class MainComponent : public juce::AudioAppComponent, public juce::Button::Liste
 	juce::TextButton recordButton { "REC" };
 
 	bool isLibraryOpen = false;
+	bool isMobileLayout = false;
 
 	// Audio Settings
 	std::unique_ptr<juce::AudioDeviceSelectorComponent> audioSelector;
@@ -54,6 +58,9 @@ class MainComponent : public juce::AudioAppComponent, public juce::Button::Liste
 
 	// Helper
 	void updateButtonColors();
+	bool detectMobileLayout() const;
+	void layoutMobile(juce::Rectangle<int>& area);
+	void layoutDesktop(juce::Rectangle<int>& area);
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
